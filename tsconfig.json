@@ -3,6 +3,11 @@
   "references": [
     { "path": "./packages/contracts" },
     { "path": "./packages/config" },
-    { "path": "./packages/testing" }
+    { "path": "./packages/testing" },
+    { "path": "./packages/acquisition" },
+    { "path": "./packages/github-source" },
+    { "path": "./packages/object-storage" },
+    { "path": "./packages/job-queue" },
+    { "path": "./packages/observability" }
   ]
 }

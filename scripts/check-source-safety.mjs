@@ -7,7 +7,10 @@ const prohibited = [
   /\beval\s*\(/,
   /\bexec\s*\(/,
   /\bspawn\s*\(/,
+  /\bimport\s*\(/,
   /docker\.sock/,
+  /\bgit\s+(?:clone|checkout)\b/,
+  /\b(?:preinstall|postinstall|prepare)\b.*(?:source|repository|acquired)/i,
   /\b(?:npm|pnpm|yarn|pip)\s+install\b/,
 ];
 const roots = [new URL("../packages/", import.meta.url), new URL("../apps/", import.meta.url)];

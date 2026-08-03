@@ -14,3 +14,7 @@ Use a PostgreSQL-backed queue behind an application-owned port. Enqueue and rela
 ## Consequences
 
 Redis and Kafka are not introduced. A later queue implementation can replace the adapter if measured throughput requires it.
+
+## M01 implementation status
+
+M01 defines the application-owned store contract, PostgreSQL schema for acquisition jobs/results and immutable snapshot identity, and deterministic contract adapter. The four M01 stages, retries, cancellation, operator review, partial results, and idempotency are implemented; production connection/worker deployment remains separately gated.

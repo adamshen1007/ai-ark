@@ -6,13 +6,20 @@
 
 Infrastructure packages implement inward-owned ports. A lower layer cannot import a higher layer.
 
-## M00 matrix
+## M00–M01 matrix
 
-| Package             | May depend on internal packages                  |
-| ------------------- | ------------------------------------------------ |
-| `@ai-ark/contracts` | none                                             |
-| `@ai-ark/config`    | `@ai-ark/contracts` (reserved; currently unused) |
-| `@ai-ark/testing`   | `@ai-ark/contracts`                              |
+| Package                  | May depend on internal packages                  |
+| ------------------------ | ------------------------------------------------ |
+| `@ai-ark/contracts`      | none                                             |
+| `@ai-ark/config`         | `@ai-ark/contracts` (reserved; currently unused) |
+| `@ai-ark/testing`        | `@ai-ark/contracts`                              |
+| `@ai-ark/acquisition`    | `@ai-ark/contracts`                              |
+| `@ai-ark/github-source`  | `@ai-ark/contracts`                              |
+| `@ai-ark/object-storage` | `@ai-ark/contracts`                              |
+| `@ai-ark/job-queue`      | `@ai-ark/contracts`                              |
+| `@ai-ark/observability`  | none                                             |
+
+The testing package may additionally consume the M01 application and adapters to compose deterministic integration tests; production dependency direction is unchanged.
 
 The executable policy is `scripts/check-dependency-boundaries.mjs`. Every new package must be added with an explicit allowed dependency set; an unknown package fails closed.
 

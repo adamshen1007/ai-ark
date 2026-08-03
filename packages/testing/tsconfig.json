@@ -5,5 +5,11 @@
     "rootDir": "src"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../contracts" }]
+  "references": [
+    { "path": "../contracts" },
+    { "path": "../acquisition" },
+    { "path": "../github-source" },
+    { "path": "../job-queue" },
+    { "path": "../object-storage" }
+  ]
 }

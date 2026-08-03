@@ -13,7 +13,7 @@
 
 Acquired repositories must be read through approved provider APIs without checkout. Runtime code handling acquired content must not use child processes, dynamic imports of acquired paths, `eval`, package managers, interpreters, containers, or a Docker socket. Commands found in source may be retained as bounded untrusted text only.
 
-`pnpm lint:source-safety` statically checks runtime paths for prohibited mechanisms. Later milestones must add path, content-size, egress, prompt-injection, evidence-ownership, and publication-bypass negative tests.
+`pnpm lint:source-safety` statically checks runtime paths for prohibited mechanisms. M01 adds path, entry/file/byte/line, encoding, binary, archive, executable, encryption, symlink, submodule, duplicate, case-collision, and prompt-like-content negative tests. Acquired text has storage authority only; it has no command, import, container, hook, AI, or publication authority.
 
 ## Egress separation
 

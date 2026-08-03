@@ -14,3 +14,7 @@ Treat acquired content only as bounded untrusted data. Do not run source command
 ## Consequences
 
 The alpha evaluates declared and statically observable facts, not runtime behavior. Any future runtime verification requires a separately authorized architecture and cannot weaken this ingestion boundary.
+
+## M01 implementation status
+
+M01 inventories paths before fetching and validates content before storage. Negative tests cover malicious paths, links, submodules, binaries, archives, executables, invalid encodings, encryption, limits, and hostile textual instructions; source-safety lint continues to reject execution mechanisms.

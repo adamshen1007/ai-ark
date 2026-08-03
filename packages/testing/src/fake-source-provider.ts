@@ -1,5 +1,8 @@
 import type {
-  RepositorySignals,
+  ForkSignals,
+  LicenseSignals,
+  ReleaseSignals,
+  RepositoryMetadata,
   ResolvedSourceSnapshot,
   SourceEntryContent,
   SourceEntryDescriptor,
@@ -11,7 +14,10 @@ export interface FakeSourceRepository {
   readonly reference: ValidatedSourceReference;
   readonly snapshot: ResolvedSourceSnapshot;
   readonly entries: readonly SourceEntryContent[];
-  readonly signals: RepositorySignals;
+  readonly metadata: RepositoryMetadata;
+  readonly releaseSignals: ReleaseSignals;
+  readonly licenseSignals: LicenseSignals;
+  readonly forkSignals: ForkSignals;
 }
 
 export class FakeSourceProvider implements SourceProvider {
@@ -37,6 +43,11 @@ export class FakeSourceProvider implements SourceProvider {
     return Promise.resolve(this.repository.entries.map(({ descriptor }) => descriptor));
   }
 
+  public getRepositoryMetadata(snapshot: ResolvedSourceSnapshot): Promise<RepositoryMetadata> {
+    this.calls.push(`getRepositoryMetadata:${snapshot.immutableRevision}`);
+    return Promise.resolve(this.repository.metadata);
+  }
+
   public fetchEntry(
     snapshot: ResolvedSourceSnapshot,
     entry: SourceEntryDescriptor,
@@ -47,8 +58,18 @@ export class FakeSourceProvider implements SourceProvider {
     return Promise.resolve({ descriptor: match.descriptor, bytes: new Uint8Array(match.bytes) });
   }
 
-  public getRepositorySignals(snapshot: ResolvedSourceSnapshot): Promise<RepositorySignals> {
-    this.calls.push(`getRepositorySignals:${snapshot.immutableRevision}`);
-    return Promise.resolve(this.repository.signals);
+  public getReleaseSignals(snapshot: ResolvedSourceSnapshot): Promise<ReleaseSignals> {
+    this.calls.push(`getReleaseSignals:${snapshot.immutableRevision}`);
+    return Promise.resolve(this.repository.releaseSignals);
+  }
+
+  public getLicenseSignals(snapshot: ResolvedSourceSnapshot): Promise<LicenseSignals> {
+    this.calls.push(`getLicenseSignals:${snapshot.immutableRevision}`);
+    return Promise.resolve(this.repository.licenseSignals);
+  }
+
+  public getForkSignals(snapshot: ResolvedSourceSnapshot): Promise<ForkSignals> {
+    this.calls.push(`getForkSignals:${snapshot.immutableRevision}`);
+    return Promise.resolve(this.repository.forkSignals);
   }
 }

@@ -18,7 +18,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ai-ark/acquisition": "workspace:*",
     "@ai-ark/contracts": "workspace:*",
+    "@ai-ark/github-source": "workspace:*",
+    "@ai-ark/job-queue": "workspace:*",
+    "@ai-ark/object-storage": "workspace:*",
     "@testcontainers/postgresql": "12.0.4",
     "pg": "8.22.0"
   },

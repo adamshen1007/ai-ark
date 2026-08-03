@@ -14,3 +14,7 @@ Store selected normalized bytes through an S3-compatible port under SHA-256 cont
 ## Consequences
 
 Storage is provider-neutral and deduplicated. Integrity and orphan checks are required before staging.
+
+## M01 implementation status
+
+M01 implements the inward-owned storage contract, verified `source-files/sha256/{prefix}/{full-hash}` keys, an S3-compatible client adapter, and a deterministic immutable test adapter.

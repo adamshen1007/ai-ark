@@ -45,17 +45,55 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/acquisition:
+    dependencies:
+      '@ai-ark/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
   packages/contracts:
     dependencies:
       zod:
         specifier: 4.4.3
         version: 4.4.3
 
-  packages/testing:
+  packages/github-source:
     dependencies:
       '@ai-ark/contracts':
         specifier: workspace:*
         version: link:../contracts
+
+  packages/job-queue:
+    dependencies:
+      '@ai-ark/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
+  packages/object-storage:
+    dependencies:
+      '@ai-ark/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
+  packages/observability: {}
+
+  packages/testing:
+    dependencies:
+      '@ai-ark/acquisition':
+        specifier: workspace:*
+        version: link:../acquisition
+      '@ai-ark/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@ai-ark/github-source':
+        specifier: workspace:*
+        version: link:../github-source
+      '@ai-ark/job-queue':
+        specifier: workspace:*
+        version: link:../job-queue
+      '@ai-ark/object-storage':
+        specifier: workspace:*
+        version: link:../object-storage
       '@testcontainers/postgresql':
         specifier: 12.0.4
         version: 12.0.4

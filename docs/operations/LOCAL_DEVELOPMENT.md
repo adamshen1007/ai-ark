@@ -16,7 +16,7 @@ pnpm install --frozen-lockfile
 pnpm verify
 ```
 
-Required unit and contract gates are offline after installation. No GitHub or AI credential is required. The PostgreSQL harness is opt-in and does not start during M00 unit or contract gates.
+Required unit and contract gates are offline after installation. No GitHub or AI credential is required. The PostgreSQL harness is opt-in and does not start during required M00/M01 gates. M01 uses an injected fake GitHub transport and deterministic object/job adapters; no live repository, checkout, or repository dependency installation is used.
 
 ## Environment
 

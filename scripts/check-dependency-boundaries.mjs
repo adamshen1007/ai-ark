@@ -4,7 +4,21 @@ import { join } from "node:path";
 const allowed = new Map([
   ["@ai-ark/contracts", new Set()],
   ["@ai-ark/config", new Set(["@ai-ark/contracts"])],
-  ["@ai-ark/testing", new Set(["@ai-ark/contracts"])],
+  [
+    "@ai-ark/testing",
+    new Set([
+      "@ai-ark/acquisition",
+      "@ai-ark/contracts",
+      "@ai-ark/github-source",
+      "@ai-ark/job-queue",
+      "@ai-ark/object-storage",
+    ]),
+  ],
+  ["@ai-ark/acquisition", new Set(["@ai-ark/contracts"])],
+  ["@ai-ark/github-source", new Set(["@ai-ark/contracts"])],
+  ["@ai-ark/object-storage", new Set(["@ai-ark/contracts"])],
+  ["@ai-ark/job-queue", new Set(["@ai-ark/contracts"])],
+  ["@ai-ark/observability", new Set()],
 ]);
 
 const packageRoot = new URL("../packages/", import.meta.url);
@@ -37,5 +51,5 @@ if (failures.length > 0) {
   console.error(failures.join("\n"));
   process.exitCode = 1;
 } else {
-  console.log("Dependency boundaries valid for 3 M00 packages.");
+  console.log(`Dependency boundaries valid for ${allowed.size} M00-M01 packages.`);
 }
