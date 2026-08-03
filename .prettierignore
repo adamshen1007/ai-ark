@@ -1,0 +1,14 @@
+node_modules
+dist
+.turbo
+coverage
+pnpm-lock.yaml
+docs/design
+docs/architecture/AI ARK*.md
+docs/product
+docs/reviews
+docs/strategy
+docs/ux
+docs/execution
+docs/validation/AI ARK*.md
+specs

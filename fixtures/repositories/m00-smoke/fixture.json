@@ -1,0 +1,4 @@
+{
+  "description": "Deterministic M00 fixture used to validate fixture loading only",
+  "schemaVersion": "0.1.0"
+}
