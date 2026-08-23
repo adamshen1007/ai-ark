@@ -7,6 +7,12 @@ import type {
   SourceSnapshot,
 } from "@ai-ark/contracts";
 
+export * from "./job-supersession.js";
+export * from "./m02-human-command-plan.js";
+export * from "./m02-human-projectors.js";
+export * from "./postgres-manual-resolution.js";
+export * from "./postgres-system-identity.js";
+
 const stageOrder: readonly AcquisitionStage[] = [
   "RECEIVED",
   "VALIDATING_SOURCE",

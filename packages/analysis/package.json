@@ -1,5 +1,5 @@
 {
-  "name": "@ai-ark/testing",
+  "name": "@ai-ark/analysis",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -18,16 +18,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ai-ark/acquisition": "workspace:*",
-    "@ai-ark/contracts": "workspace:*",
-    "@ai-ark/github-source": "workspace:*",
-    "@ai-ark/identity": "workspace:*",
-    "@ai-ark/job-queue": "workspace:*",
-    "@ai-ark/object-storage": "workspace:*",
-    "@testcontainers/postgresql": "12.0.4",
-    "pg": "8.22.0"
-  },
-  "devDependencies": {
-    "@types/pg": "8.20.3"
+    "@ai-ark/classification": "workspace:*",
+    "@ai-ark/contracts": "workspace:*"
   }
 }

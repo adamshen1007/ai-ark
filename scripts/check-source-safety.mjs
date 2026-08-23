@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const prohibited = [
   /node:child_process/,
@@ -14,9 +15,11 @@ const prohibited = [
   /\b(?:npm|pnpm|yarn|pip)\s+install\b/,
 ];
 const roots = [new URL("../packages/", import.meta.url), new URL("../apps/", import.meta.url)];
-const failures = [];
+export function inspectSourceSafetyText(source) {
+  return prohibited.filter((pattern) => pattern.test(source)).map((pattern) => pattern.toString());
+}
 
-async function scan(path) {
+async function scan(path, failures) {
   let entries;
   try {
     entries = await readdir(path, { withFileTypes: true });
@@ -26,21 +29,26 @@ async function scan(path) {
   }
   for (const entry of entries) {
     const target = join(path, entry.name);
-    if (entry.isDirectory()) await scan(target);
+    if (entry.isDirectory()) await scan(target, failures);
     else if ([".ts", ".tsx", ".js", ".mjs"].includes(extname(entry.name))) {
       const source = await readFile(target, "utf8");
-      prohibited.forEach((pattern) => {
-        if (pattern.test(source)) failures.push(`${target}: ${pattern}`);
-      });
+      inspectSourceSafetyText(source).forEach((pattern) => failures.push(`${target}: ${pattern}`));
     }
   }
 }
 
-for (const root of roots) await scan(root.pathname);
+export async function inspectSourceSafetyRoots(scanRoots = roots) {
+  const failures = [];
+  for (const root of scanRoots) await scan(root.pathname, failures);
+  return failures;
+}
 
-if (failures.length > 0) {
-  console.error(failures.join("\n"));
-  process.exitCode = 1;
-} else {
-  console.log("No prohibited acquired-source execution paths found.");
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const failures = await inspectSourceSafetyRoots();
+  if (failures.length > 0) {
+    console.error(failures.join("\n"));
+    process.exitCode = 1;
+  } else {
+    console.log("No prohibited acquired-source execution paths found.");
+  }
 }

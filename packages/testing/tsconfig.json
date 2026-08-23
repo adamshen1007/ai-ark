@@ -9,6 +9,7 @@
     { "path": "../contracts" },
     { "path": "../acquisition" },
     { "path": "../github-source" },
+    { "path": "../identity" },
     { "path": "../job-queue" },
     { "path": "../object-storage" }
   ]

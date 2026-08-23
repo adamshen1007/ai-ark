@@ -1,5 +1,5 @@
 {
-  "name": "@ai-ark/job-queue",
+  "name": "@ai-ark/classification",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,21 +10,15 @@
     }
   },
   "files": [
-    "dist",
-    "migrations"
+    "dist"
   ],
+  "dependencies": {
+    "@ai-ark/contracts": "workspace:*",
+    "commonmark": "0.31.2"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@ai-ark/classification": "workspace:*",
-    "@ai-ark/contracts": "workspace:*",
-    "@ai-ark/identity": "workspace:*",
-    "pg": "8.22.0"
-  },
-  "devDependencies": {
-    "@types/pg": "8.20.3"
   }
 }

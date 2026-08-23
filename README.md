@@ -2,7 +2,9 @@
 
 AI ARK is a governed GitHub-to-Skill Technical Alpha. The system is intended to turn a fixed public GitHub source revision into evidence-backed Skill records that require explicit human approval before internal publication.
 
-M00 established governance and repository foundations. M01 implements the GitHub acquisition foundation: provider-API-only immutable snapshots, fail-closed inventory/content policy, content-addressed storage, and durable acquisition stages. It does not classify repositories, call AI providers, publish records, or expose a product UI.
+M00 established governance and repository foundations. M01 is the approved GitHub acquisition foundation: provider-API-only immutable snapshots, fail-closed inventory/content policy, content-addressed storage, and durable acquisition stages.
+
+M02 is an uncommitted implementation claim pending independent whole-patch review. Its scoped implementation adds deterministic repository classification, bounded offline AI-analysis contracts, candidate fingerprints and ownership, stable Resource/ResourceVersion identity, reviewed duplicate/fork/mirror handling, durable manual-resolution and job-supersession contracts, and a forward PostgreSQL migration. It does not generate descriptions, publish records, execute acquired source, call a live AI or GitHub provider, or expose a product UI.
 
 ## Runtime
 

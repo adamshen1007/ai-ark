@@ -1,0 +1,457 @@
+{
+  "version": "m02-v1",
+  "scenarios": [
+    { "id": "F01-single-root", "gate": "classification", "expected": "SINGLE_SKILL" },
+    { "id": "F02-multiple", "gate": "classification", "expected": "MULTIPLE_SKILLS" },
+    { "id": "F03-collection", "gate": "grouping", "expected": "SKILL_COLLECTION" },
+    { "id": "F04-skill-app", "gate": "grouping", "expected": "SKILL_PLUS_APPLICATION" },
+    { "id": "F05-non-skill", "gate": "jobs", "expected": "NON_SKILL" },
+    { "id": "F06-ambiguous-overlap", "gate": "ownership", "expected": "AMBIGUOUS" },
+    { "id": "F07-unsupported", "gate": "security", "expected": "UNSUPPORTED" },
+    { "id": "F08-example-only", "gate": "classification", "expected": "NON_SKILL" },
+    {
+      "id": "F09-same-content-roots",
+      "gate": "fingerprints",
+      "expected": "CONTENT_EQUAL_CANDIDATE_DISTINCT"
+    },
+    {
+      "id": "F10-same-content-repositories",
+      "gate": "fingerprints",
+      "expected": "CONTENT_EQUAL_SOURCE_DISTINCT"
+    },
+    { "id": "F11-shared-root-files", "gate": "ownership", "expected": "SHARED_OWNERSHIP_VALID" },
+    { "id": "F12-reordered-input", "gate": "fingerprints", "expected": "ORDER_INDEPENDENT" },
+    { "id": "F13-overlap-change", "gate": "fingerprints", "expected": "ROOT_FINGERPRINT_CHANGED" },
+    {
+      "id": "F14-shared-change",
+      "gate": "fingerprints",
+      "expected": "CONTENT_FINGERPRINT_CHANGED"
+    },
+    { "id": "F15-methodology-only", "gate": "identity", "expected": "VERSION_REUSED" },
+    { "id": "F16-same-content-new-snapshot", "gate": "identity", "expected": "OBSERVATION_ADDED" },
+    { "id": "F17-changed-source", "gate": "identity", "expected": "EXISTING_RESOURCE_NEW_VERSION" },
+    { "id": "F18-identity-matrix", "gate": "identity", "expected": "PRECEDENCE_MATRIX" },
+    { "id": "F19-minimum-shells", "gate": "identity", "expected": "NON_PUBLIC_SHELLS" },
+    {
+      "id": "F20-duplicate-no-source-resource",
+      "gate": "relationships",
+      "expected": "DUPLICATE_OF_VERSION"
+    },
+    {
+      "id": "F21-independent-fork",
+      "gate": "relationships",
+      "expected": "VERSION_FORK_OF_VERSION"
+    },
+    { "id": "F22-mirror", "gate": "relationships", "expected": "SOURCE_MIRROR_OF_SOURCE" },
+    {
+      "id": "F23-relationship-correction",
+      "gate": "relationships",
+      "expected": "IMMUTABLE_SUPERSESSION"
+    },
+    { "id": "F24-command-roles", "gate": "commands", "expected": "ROLE_MATRIX" },
+    { "id": "F25-mixed-job", "gate": "jobs", "expected": "OPERATOR_REVIEW_REQUIRED" },
+    { "id": "F26-stale-worker", "gate": "concurrency", "expected": "STALE_WRITE_REJECTED" },
+    { "id": "F27-partial-failure", "gate": "jobs", "expected": "EVIDENCE_RETAINED" },
+    { "id": "F28-limits", "gate": "analysis", "expected": "BOUNDARY_PASS_ONE_OVER_FAIL" },
+    { "id": "F29-collision", "gate": "fingerprints", "expected": "FINGERPRINT_COLLISION" },
+    { "id": "F30-hostile-source", "gate": "security", "expected": "INERT_REJECTED" },
+    { "id": "F31-parser-profile", "gate": "parser-profile", "expected": "PROFILE_CONFORMANCE" },
+    {
+      "id": "F32-bounded-input-fingerprint",
+      "gate": "fingerprints",
+      "expected": "CANONICAL_GOLDEN"
+    },
+    { "id": "F33-external-identifiers", "gate": "identity", "expected": "EXTERNAL_ID_V1" },
+    { "id": "F34-command-concurrency", "gate": "concurrency", "expected": "SERIALIZED_FIRST_USE" },
+    { "id": "F35-job-supersession", "gate": "jobs", "expected": "LINEAR_CONTROLLER_CHAIN" },
+    {
+      "id": "F36-lock-categories",
+      "gate": "concurrency",
+      "expected": "SERIALIZABLE_GUARD_LIFECYCLE"
+    },
+    {
+      "id": "F37-mode-expansion",
+      "gate": "commands",
+      "expected": "EXACT_256_HUMAN_PROJECTION_MODES"
+    },
+    {
+      "id": "F38-topology-control",
+      "gate": "topology",
+      "expected": "CANONICAL_TOPOLOGY_REPLACEMENT"
+    },
+    {
+      "id": "F39-replacement-clarifications",
+      "gate": "clarifications",
+      "expected": "REPLACEMENT_CLARIFICATIONS_Z0_Z1"
+    },
+    {
+      "id": "F40-audit-multiplicity",
+      "gate": "audit",
+      "expected": "EXACT_TYPED_AUDIT_MULTIPLICITY"
+    },
+    {
+      "id": "F41-server-id-independent-guards",
+      "gate": "concurrency",
+      "expected": "SERVER_ID_INDEPENDENT_GUARDS"
+    },
+    {
+      "id": "F42-system-identity-projection",
+      "gate": "system-identity",
+      "expected": "EXACT_22_SYSTEM_IDENTITY_MODES"
+    }
+  ],
+  "expectedEvidence": [
+    {
+      "id": "F01",
+      "fingerprints": [],
+      "records": ["candidate:."],
+      "decision": "SINGLE_SKILL",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F02",
+      "fingerprints": [],
+      "records": ["candidate:alpha", "candidate:beta"],
+      "decision": "MULTIPLE_SKILLS",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F03",
+      "fingerprints": [],
+      "records": ["group:collection", "relationship:INCLUDES:alpha", "relationship:INCLUDES:beta"],
+      "decision": "SKILL_COLLECTION",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F04",
+      "fingerprints": [],
+      "records": ["group:application", "relationship:BUNDLES:skills/one"],
+      "decision": "SKILL_PLUS_APPLICATION",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F05",
+      "fingerprints": [],
+      "records": ["group:zero-candidates", "job:completed"],
+      "decision": "NON_SKILL",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F06",
+      "fingerprints": [],
+      "records": ["candidate:root", "candidate:nested"],
+      "decision": "AMBIGUOUS",
+      "auditStates": ["IDENTITY_REVIEW_REQUIRED"]
+    },
+    {
+      "id": "F07",
+      "fingerprints": [],
+      "records": ["classification-run:unsupported"],
+      "decision": "UNSUPPORTED",
+      "auditStates": ["FAIL_CLOSED"]
+    },
+    {
+      "id": "F08",
+      "fingerprints": [],
+      "records": ["excluded:examples/one/SKILL.md"],
+      "decision": "NON_SKILL",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F09",
+      "fingerprints": [
+        "5daed103b224719667b12d19852de5a1d32b9fa6a56a6836b10c3112d326dc77",
+        "c84d721db24d61b51bf86b526181ad34a86ee7e3a53224714dc3f857920b759f",
+        "7fc89b7971221df8593758aafa9edf14388c02f99d802f53b9293433bf512002"
+      ],
+      "records": ["candidate:alpha", "candidate:beta"],
+      "decision": "CONTENT_EQUAL_ROOT_DISTINCT",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F10",
+      "fingerprints": ["5daed103b224719667b12d19852de5a1d32b9fa6a56a6836b10c3112d326dc77"],
+      "records": ["candidate:snapshot-a", "candidate:snapshot-b"],
+      "decision": "SOURCE_CANDIDATES_DISTINCT",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F11",
+      "fingerprints": [
+        "4e5546c8ab00e43fcdefe89572214b501af83b1650d7c17dd390f950bf70af0e",
+        "d00274021d5cf1cc5a73cf9e0b9ed028d1df65fe3016fd9fe5422f5b8895c324"
+      ],
+      "records": ["ownership:README.md:SHARED"],
+      "decision": "SHARED_OWNERSHIP_VALID",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F12",
+      "fingerprints": [
+        "4e5546c8ab00e43fcdefe89572214b501af83b1650d7c17dd390f950bf70af0e",
+        "d00274021d5cf1cc5a73cf9e0b9ed028d1df65fe3016fd9fe5422f5b8895c324"
+      ],
+      "records": ["ordering:bytewise"],
+      "decision": "ORDER_INDEPENDENT",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F13",
+      "fingerprints": [
+        "c84d721db24d61b51bf86b526181ad34a86ee7e3a53224714dc3f857920b759f",
+        "3f1cb99a44a869a27c4ed47ccfb284ed3d4d51fd407102e3a8e2c31b4edcd07e"
+      ],
+      "records": ["root:alpha", "root:skills/alpha"],
+      "decision": "ROOT_FINGERPRINT_CHANGED",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F14",
+      "fingerprints": [
+        "aee2cb9567b9c74d78c7ab1293ecf2cf0ba7a647eb5b33666e73a021a5e52fb9",
+        "fa9085819cfe4aac052a87b71895afcbee5d512186efe50349fb2b33bc0f965b"
+      ],
+      "records": ["shared:README.md"],
+      "decision": "CONTENT_FINGERPRINT_CHANGED",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F15",
+      "fingerprints": [],
+      "records": ["candidate:candidate-1", "version:version-1", "observation:snapshot-1"],
+      "decision": "VERSION_REUSED",
+      "auditStates": ["METHODOLOGY_SUPERSEDED"]
+    },
+    {
+      "id": "F16",
+      "fingerprints": [],
+      "records": ["version:version-1", "observation:snapshot-2"],
+      "decision": "OBSERVATION_ADDED",
+      "auditStates": ["OBSERVED"]
+    },
+    {
+      "id": "F17",
+      "fingerprints": [],
+      "records": ["version:version-2", "observation:snapshot-3"],
+      "decision": "EXISTING_RESOURCE_NEW_VERSION",
+      "auditStates": ["OBSERVED"]
+    },
+    {
+      "id": "F18",
+      "fingerprints": [],
+      "records": ["identity-decision:precedence-matrix"],
+      "decision": "AMBIGUOUS_ON_CONTRADICTION",
+      "auditStates": ["REVIEW_REQUIRED"]
+    },
+    {
+      "id": "F19",
+      "fingerprints": [],
+      "records": ["resource:resource-1", "version:version-1"],
+      "decision": "NON_PUBLIC_SHELLS",
+      "auditStates": ["IDENTITY_RESOLVED"]
+    },
+    {
+      "id": "F20",
+      "fingerprints": [],
+      "records": ["duplicate:duplicate-1", "version:version-a"],
+      "decision": "DUPLICATE_OF_VERSION",
+      "auditStates": ["ACTIVE"]
+    },
+    {
+      "id": "F21",
+      "fingerprints": [],
+      "records": ["fork:fork-1", "version:version-a", "version:version-b"],
+      "decision": "VERSION_FORK_OF_VERSION",
+      "auditStates": ["ACTIVE"]
+    },
+    {
+      "id": "F22",
+      "fingerprints": [],
+      "records": ["mirror:mirror-1", "source-link:source-link-1"],
+      "decision": "SOURCE_MIRROR_OF_SOURCE",
+      "auditStates": ["ACTIVE"]
+    },
+    {
+      "id": "F23",
+      "fingerprints": [],
+      "records": ["mirror:mirror-1", "mirror:mirror-2", "source-link:source-link-2"],
+      "decision": "IMMUTABLE_SUPERSESSION",
+      "auditStates": ["SUPERSEDED", "ACTIVE"]
+    },
+    {
+      "id": "F24",
+      "fingerprints": [],
+      "records": ["manual-command:role-matrix"],
+      "decision": "ROLE_MATRIX",
+      "auditStates": ["ACCEPTED", "REJECTED"]
+    },
+    {
+      "id": "F25",
+      "fingerprints": [],
+      "records": ["candidate:resolved", "candidate:rejected", "candidate:ambiguous"],
+      "decision": "OPERATOR_REVIEW_REQUIRED",
+      "auditStates": ["IDENTITY_REVIEW_REQUIRED"]
+    },
+    {
+      "id": "F26",
+      "fingerprints": [],
+      "records": ["job:cancelled", "job:superseded"],
+      "decision": "STALE_WRITE_REJECTED",
+      "auditStates": ["REJECTED"]
+    },
+    {
+      "id": "F27",
+      "fingerprints": [],
+      "records": ["evidence:evidence-a"],
+      "decision": "FAILED_NO_HANDOFF",
+      "auditStates": ["EVIDENCE_RETAINED"]
+    },
+    {
+      "id": "F28",
+      "fingerprints": [],
+      "records": ["analysis-run:bounded"],
+      "decision": "BOUNDARY_PASS_ONE_OVER_FAIL",
+      "auditStates": ["LIMIT_EXCEEDED"]
+    },
+    {
+      "id": "F29",
+      "fingerprints": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "records": ["guard:fingerprint-collision"],
+      "decision": "FINGERPRINT_COLLISION",
+      "auditStates": ["REJECTED"]
+    },
+    {
+      "id": "F30",
+      "fingerprints": [],
+      "records": ["analysis-run:hostile-source"],
+      "decision": "INERT_REJECTED",
+      "auditStates": ["INVALID_OUTPUT"]
+    },
+    {
+      "id": "F31",
+      "fingerprints": [],
+      "records": ["parser-profile:v1"],
+      "decision": "PROFILE_CONFORMANCE",
+      "auditStates": ["FAIL_CLOSED"]
+    },
+    {
+      "id": "F32",
+      "fingerprints": ["fac53cd41b682dc4d7afe7aa0b17baf08e7c591129f0dc996aeb3bdc3aa99dc3"],
+      "records": ["bounded-input:v1"],
+      "decision": "CANONICAL_GOLDEN",
+      "auditStates": ["DETERMINISTIC"]
+    },
+    {
+      "id": "F33",
+      "fingerprints": [],
+      "records": ["external-id:github.com:anthropic"],
+      "decision": "EXTERNAL_ID_V1",
+      "auditStates": ["VERIFIED"]
+    },
+    {
+      "id": "F34",
+      "fingerprints": [],
+      "records": ["guard:null-to-v1", "manual-command:serialized"],
+      "decision": "SERIALIZED_FIRST_USE",
+      "auditStates": ["ONE_ACCEPTED", "ONE_REJECTED"]
+    },
+    {
+      "id": "F35",
+      "fingerprints": [],
+      "records": ["job:job_a", "job:job_b", "job-supersession:edge_1"],
+      "decision": "LINEAR_CONTROLLER_CHAIN",
+      "auditStates": ["SUPERSEDED", "CONTROLLING"]
+    },
+    {
+      "id": "F36",
+      "fingerprints": ["91c9b186d0188162b0e700ab43c697e082549eeffa20a915a133e32166094962"],
+      "records": [
+        "receipt:concurrency.winner_loser:sha256=467c4a393e134a9826a3668ad514fe7a4e1e588766af2d07620caf82f3965440:bytes=184",
+        "receipt:concurrency.plan_drift:sha256=4417654659d92abde25957721f6f00b7cf7551afbab421099838eaa367937000:bytes=60",
+        "receipt:concurrency.rollback:sha256=13b68f2d91816fc71a04afbf84a05c512a9e880ebdf856a37fc3c809c836eb5a:bytes=2112",
+        "receipt:concurrency.replay:sha256=2960cb2d026b3ec35978928230adb81c3813458fffa06d453e4c49d04ebbd092:bytes=255",
+        "receipt:concurrency.retry:sha256=babfbe01e0d005f405e2b41f1132078a7706de8cf3a5a2c00b568866970c989f:bytes=248"
+      ],
+      "decision": "EXECUTED_RECEIPTS:F36:count=5:sha256=ac0193d2940d2e9912b075d56e3258fba275347fce6a1dacee77726cad3eff7f",
+      "auditStates": [
+        "receipt-group:concurrency:count=5:sha256=ac0193d2940d2e9912b075d56e3258fba275347fce6a1dacee77726cad3eff7f"
+      ]
+    },
+    {
+      "id": "F37",
+      "fingerprints": ["784225a533f2fba3bdaba44aa5ebfa7b5302677652563ef09e70462c174a5a72"],
+      "records": [
+        "receipt:modes.committed_ids:sha256=2bba1b4dcddbc644b54dffb8e241e08fdda0abcb1ee25212a352f07b27cf92e1:bytes=9779",
+        "receipt:modes.plan_result_postconditions:sha256=959ac5a71545f97a22ffdf93313a00bfb5487cee258651732a887f913f01b1b4:bytes=1604776"
+      ],
+      "decision": "EXECUTED_RECEIPTS:F37:count=2:sha256=753c27d028c6eba7717d2150f2f59c375ce1b669ffecb79563bb5e3460d02f60",
+      "auditStates": [
+        "receipt-group:modes:count=2:sha256=753c27d028c6eba7717d2150f2f59c375ce1b669ffecb79563bb5e3460d02f60"
+      ]
+    },
+    {
+      "id": "F38",
+      "fingerprints": ["b3326cbd53afab397da24f8b792ad2384482bfe8dd41ae9aa721caa4c6ca3a46"],
+      "records": [
+        "receipt:topology.rows_mappings_history:sha256=c362c2b8a882cd1ae8f2f2e122efe496dab8ceabefdac46911d712371f27a530:bytes=83500"
+      ],
+      "decision": "EXECUTED_RECEIPTS:F38:count=1:sha256=fef24f9ee4ab8b5166184fafdfc3bb4aaa8e3a7c315fb625b95a550568893793",
+      "auditStates": [
+        "receipt-group:topology:count=1:sha256=fef24f9ee4ab8b5166184fafdfc3bb4aaa8e3a7c315fb625b95a550568893793"
+      ]
+    },
+    {
+      "id": "F39",
+      "fingerprints": ["814b76a2db68ffad72209d905cb637fc58ca756d8b03dc3c73a160b7b602a889"],
+      "records": [
+        "receipt:replacement.modes_and_predecessors:sha256=af48d832ef36db236575632d69bb154637d26af1a3b471dd219268dc5e6671ce:bytes=19801",
+        "receipt:replacement.outside_clarification:sha256=36e51bccaadec54dde84b800acdbc3fb028de217915b3379212fd2856a0d5d09:bytes=413"
+      ],
+      "decision": "EXECUTED_RECEIPTS:F39:count=2:sha256=458a19dda52a557494322c66570d9c1eb5b33ddd665774481dc9d3003d1f2ef1",
+      "auditStates": [
+        "receipt-group:replacement:count=2:sha256=458a19dda52a557494322c66570d9c1eb5b33ddd665774481dc9d3003d1f2ef1"
+      ]
+    },
+    {
+      "id": "F40",
+      "fingerprints": ["ed153a68116f9c4d3b8a6511d0e1c4d455f8490849241da3fb5468043fb68d65"],
+      "records": [
+        "receipt:audits.actions_subjects_before_after:sha256=5647bff56790bf0df1f774d921313a9c6ae652b7716ae62e1579942132941c0a:bytes=485727",
+        "receipt:audits.mapping_cardinality:sha256=c8b9c84cec324c405848291b7af9d69e15408fae59423e1b42a33f7b981481ac:bytes=54136"
+      ],
+      "decision": "EXECUTED_RECEIPTS:F40:count=2:sha256=647a3037efc0f283a2556fd2a738486174bcac98c78af547ae8e4f4ffa39eedb",
+      "auditStates": [
+        "receipt-group:audits:count=2:sha256=647a3037efc0f283a2556fd2a738486174bcac98c78af547ae8e4f4ffa39eedb"
+      ]
+    },
+    {
+      "id": "F41",
+      "fingerprints": ["e405894f98ec9de70da5b72bfbff76f603eee2d1b9851f8398694e67d1ddd9fc"],
+      "records": [
+        "receipt:guards.all_mode_rows:sha256=0c79d5dd845b5c6bc8a5d76b2e3e59643793addc590cbcf759f1483a73b5d2a9:bytes=628524",
+        "receipt:guards.provisional_id_independence:sha256=f419fdb0b11674db9e9a72aa05fb226e5e52ab41704388ac9a780203bd1b89c4:bytes=718"
+      ],
+      "decision": "EXECUTED_RECEIPTS:F41:count=2:sha256=3485d50247dd0f70493f71ebbcc5fdfd0eee7b2d926825f9e13246914f026901",
+      "auditStates": [
+        "receipt-group:guards:count=2:sha256=3485d50247dd0f70493f71ebbcc5fdfd0eee7b2d926825f9e13246914f026901"
+      ]
+    },
+    {
+      "id": "F42",
+      "fingerprints": ["819aa63d28efa370dea8d72c5ceeb92bd8449792ea8e502acde05f0ecb21fc31"],
+      "records": [
+        "receipt:modes.committed_ids:sha256=62503624d0ac39c74f12816643ec923942fe36a343641bffdafc1779c6298202:bytes=214",
+        "receipt:projection.operations_decisions_children_results_audits_handoffs:sha256=fec5856371d902f12050fbdc6c7616862bfa9ac5c0f3c4f726f52a97393f2849:bytes=22778",
+        "receipt:lifecycle.replay:sha256=233042b50f6b59a92b8a33fabbf77f3e5e62fc62c30fbc5c4fbb20e6100d319c:bytes=176",
+        "receipt:lifecycle.rollback:sha256=36b354624e54b48907a01ec1ca11014ff06882f32db5e816819cbcb555178b04:bytes=150",
+        "receipt:lifecycle.rejections:sha256=2ea519f31b4dd67679b610ecf8bd1749eb80aa4c90af6ca62c8cc2b7e6eaa397:bytes=258"
+      ],
+      "decision": "EXECUTED_RECEIPTS:F42:count=5:sha256=edab640beff492cc5f0d89ff5909018c36506b15c3002c94835e2a0039340ddb",
+      "auditStates": [
+        "receipt-group:lifecycle:count=3:sha256=cc108083738f327db29add171e33d8baaaea0ca3c088044835253153694cce89",
+        "receipt-group:modes:count=1:sha256=9f5327af615b2ecad14f9695953d9478470314c619c8d8bb94de95e991085933",
+        "receipt-group:projection:count=1:sha256=e92f0173ef85dc7d9aca445893fa00fad51c1b09159310e6eb029031cee92fa7"
+      ]
+    }
+  ]
+}
