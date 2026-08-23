@@ -77,7 +77,7 @@ No test was skipped.
 
 ## 7. Authority integrity
 
-The PRD, architecture, execution prompt, and prototype-review report each return `cmp=0` against the supplied `<supplied-originals-directory>` original. Their respective SHA-256 values are `e0749f…bb42`, `da50cd…05e7`, `d546c2…104a`, and `2226f5…da14` for both copies. Prettier reports `ignored: true` for all 23 authority documents. Their Git diff is empty.
+At the M01 verification point, the PRD, architecture, execution prompt, and prototype-review report each returned `cmp=0` against the supplied `<supplied-originals-directory>` copy. Their respective pre-sanitization SHA-256 values were `e0749f…bb42`, `da50cd…05e7`, `d546c2…104a`, and `2226f5…da14` for both copies. The later authorized public-history sanitization replaced a local absolute path in the prototype-review report; its current sanitized hash is recorded in the M00 documentation-integrity remediation report. Prettier reported `ignored: true` for all 23 authority documents.
 
 ## 8. Independent review and remediation
 

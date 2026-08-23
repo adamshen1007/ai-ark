@@ -2,13 +2,14 @@
 
 ## 1. Decision
 
-`M02 TASK 5 RECEIPT REMEDIATION COMPLETE — WHOLE-REPOSITORY VERIFICATION GREEN — FRESH INDEPENDENT WHOLE-PATCH REVIEW REQUIRED`
+`GO — M02 COMMITTED, PUBLICLY VERIFIED, AND CLOSED PENDING THIS AUTHORIZED PUBLIC-HISTORY SANITIZATION`
 
 Task 5 remediated the whole-repository ESLint and acquired-source scanner blockers, corrected the active
 implementation-plan authority line, closed the canonical fixture inventory through F42, replaced self-confirming
 F36–F42 evidence with fail-closed receipts populated by executed PostgreSQL predicates, and executed the required
-local M02 verification under the pinned runtime. This is an implementer verification result, not independent
-acceptance and not `M02 COMMIT READY`.
+local M02 verification under the pinned runtime. A later independent whole-patch review returned
+`GO — M02 COMMIT READY`; the authorized implementation commit was published to public `main`, and clean-checkout
+GitHub Actions verification passed. This documentation update sanitizes public history and records that final state.
 
 ## 2. Authority and scope
 
@@ -27,15 +28,14 @@ acceptance and not `M02 COMMIT READY`.
 ## 3. Repository and publication state
 
 - Root: `<repository-root>`.
-- Branch: `codex/milestone-02`.
-- HEAD, local `main`, and merge base: `85198bcfb62caaaf637271c02398f4b7390d4e6e`.
-- Upstream/remotes: none configured.
-- Index: empty; no staged files.
-- Worktree: intentionally dirty M02 patch with 12 tracked modified entries and 56 untracked files. Git's collapsed
-  status view reports 25 untracked path entries because directories are collapsed.
-- Tracked diff: 12 files, 128 insertions, 23 deletions before accounting for untracked M02 files.
-- Publication state: no commit, push, tag, PR, merge, release, deployment, or publication was performed or
-  authorized.
+- Branch/default branch: `main`.
+- Public repository: `https://github.com/adamshen1007/ai-ark` (`PUBLIC`).
+- Pre-closeout published baseline: `78b03e7f3165367c4e941786f0c4f9634e7cc98f`.
+- Public verification for that baseline: GitHub Actions workflow `ci`, run `32637549484`, conclusion `success`.
+- Local `main` tracks `origin/main`; the index and worktree were clean before this authorized documentation and
+  public-history sanitization.
+- M02 implementation was committed and pushed. No tag, GitHub Release, deployment, package publication,
+  product-content publication, or M03 work was performed.
 
 ## 4. Runtime
 
@@ -270,15 +270,17 @@ were never represented as product passes. These infrastructure attempts remain e
 - Transient Testcontainers host-port timeouts occurred during receipt iteration and the first job-supersession
   broad attempt; final fresh-container direct suites and the unchanged broad rerun passed.
 - PostgreSQL evidence uses ephemeral local PostgreSQL 17.6 containers. AI evidence uses deterministic offline
-  fakes. No live GitHub, production database/object store, OIDC, AI-provider quality, real-user, accessibility,
-  deployment, or remote-CI evidence is claimed.
-- No remote/upstream, CODEOWNERS, branch protection, or remote CI state exists in this checkout.
-- The worktree is intentionally unstaged and uncommitted. The next gate is a fresh genuinely independent,
-  read-only whole-patch re-review over tracked and untracked files. Commit readiness cannot be claimed before
-  that re-review.
+  fakes. No live GitHub acquisition, production database/object store, OIDC, AI-provider quality, real-user,
+  accessibility, or deployment evidence is claimed. Successful public clean-checkout CI is recorded separately.
+- The public remote and successful remote CI are verified. CODEOWNERS, required-reviewer rules, and branch
+  protection remain unresolved and are not claimed.
+- The final closeout gate is a fresh read-only verification of the rewritten public `main`, including history-wide
+  path sanitization, governance-state consistency, clean-checkout repository gates, and public CI.
 
 ## 13. Authorization and manual actions
 
-No manual external action is required to complete Task 5. The required next action is a separately conducted
-fresh independent re-review. Commit, staging, push, PR, merge, deployment, publication, release, and M03 work
-remain unauthorized and unperformed.
+The human product owner authorized the documentation/governance remediation, public-history sanitization, and
+force-push required to remove local path data from all published commits. Tag creation, GitHub Release creation,
+deployment, package publication, product-content publication, and M03 planning or implementation remain
+unauthorized and unperformed. After the rewritten public baseline passes clean-checkout CI, the required next
+action is a fresh read-only publication-closeout review.

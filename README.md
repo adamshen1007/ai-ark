@@ -4,7 +4,7 @@ AI ARK is a governed GitHub-to-Skill Technical Alpha. The system is intended to 
 
 M00 established governance and repository foundations. M01 is the approved GitHub acquisition foundation: provider-API-only immutable snapshots, fail-closed inventory/content policy, content-addressed storage, and durable acquisition stages.
 
-M02 is an uncommitted implementation claim pending independent whole-patch review. Its scoped implementation adds deterministic repository classification, bounded offline AI-analysis contracts, candidate fingerprints and ownership, stable Resource/ResourceVersion identity, reviewed duplicate/fork/mirror handling, durable manual-resolution and job-supersession contracts, and a forward PostgreSQL migration. It does not generate descriptions, publish records, execute acquired source, call a live AI or GitHub provider, or expose a product UI.
+M02 is completed, independently accepted, committed, and publicly verified. Its scoped implementation adds deterministic repository classification, bounded offline AI-analysis contracts, candidate fingerprints and ownership, stable Resource/ResourceVersion identity, reviewed duplicate/fork/mirror handling, durable manual-resolution and job-supersession contracts, and a forward PostgreSQL migration. It does not generate descriptions, publish records, execute acquired source, call a live AI or GitHub provider, or expose a product UI. M03 is not started or authorized.
 
 ## Runtime
 
@@ -30,6 +30,6 @@ All required root command names exist. Commands for database migrations and alph
 - Repository code and installation commands are never executed.
 - AI output has no publication authority.
 - Every material published field will require evidence and an editorial decision.
-- Public publication and production deployment are not authorized.
+- Product-content publication and production deployment are not authorized.
 
 The detailed rules are in [AGENTS.md](AGENTS.md) and [security boundaries](docs/architecture/SECURITY_BOUNDARIES.md).

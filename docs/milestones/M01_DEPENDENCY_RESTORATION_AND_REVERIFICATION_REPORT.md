@@ -78,7 +78,7 @@ The five required targeted commands executed 15 test-file runs and 73 test runs 
 
 ## 9. Authority-document integrity
 
-The four restored authority files remain byte-identical to their supplied originals:
+At the M01 reverification point, the four restored authority files were byte-identical to their supplied originals:
 
 | Authority file                                                         | `cmp` | SHA-256                                                            |
 | ---------------------------------------------------------------------- | ----: | ------------------------------------------------------------------ |
@@ -87,7 +87,10 @@ The four restored authority files remain byte-identical to their supplied origin
 | `docs/execution/AI ARK Technical Alpha Codex Execution Prompt v1.0.md` |     0 | `d546c2a431ac43eba411faacef6eb32adae00a9b43456ff0fcdfd8a14f9f104a` |
 | `docs/validation/AI ARK Prototype Review Report v1.0.md`               |     0 | `2226f5220c6956dff1d0743b04e5561ed13a8d9b3266589a53f3f5c86453da14` |
 
-Each repository/source pair has the same hash. Prettier `--file-info` returned `"ignored": true` for all 23 pre-existing authority documents. Their complete Git diff is empty.
+Each repository/source pair had the same hash at that verification point. The later authorized public-history
+sanitization replaced one local absolute path in the Prototype Review Report; its current sanitized SHA-256 is
+`56ae3b2712d2409f1549552efefd4fc876f9307ec98dd81702ea9d9d8ffd09af`, while the table preserves the historical
+pre-sanitization hash. Prettier `--file-info` returned `"ignored": true` for all 23 pre-existing authority documents.
 
 ## 10. Independent review findings
 

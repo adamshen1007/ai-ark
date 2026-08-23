@@ -25,7 +25,7 @@ The prior `M00_REPORT.md` named the Architecture document and three Validation d
 
 The Prototype Review and Usability Test Plan and the Validation and Analytics Plan were not members of the preserved four-file formatter-output set.
 
-## 3. Byte-for-byte restoration evidence
+## 3. Historical byte-for-byte restoration evidence
 
 Each repository file was compared directly with its same-named supplied original using `cmp -s`. Every comparison returned exit code `0`.
 
@@ -36,7 +36,11 @@ Each repository file was compared directly with its same-named supplied original
 | Technical Alpha Codex Execution Prompt | PASS  | `d546c2a431ac43eba411faacef6eb32adae00a9b43456ff0fcdfd8a14f9f104a` |
 | Prototype Review Report                | PASS  | `2226f5220c6956dff1d0743b04e5561ed13a8d9b3266589a53f3f5c86453da14` |
 
-The comparisons and hashes were repeated after formatter check mode; all four still returned `cmp=0` and retained the same hashes.
+The comparisons and hashes were repeated after formatter check mode; all four returned `cmp=0` and retained the
+same hashes at the M00 verification point. The later authorized public-history sanitization replaced one local
+absolute path in the Prototype Review Report. Its pre-sanitization hash remains recorded above as historical
+evidence; the sanitized public file SHA-256 is
+`56ae3b2712d2409f1549552efefd4fc876f9307ec98dd81702ea9d9d8ffd09af`.
 
 ## 4. Permanent formatter protection
 
