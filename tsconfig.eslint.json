@@ -4,9 +4,12 @@
     "noEmit": true,
     "paths": {
       "@ai-ark/acquisition": ["./packages/acquisition/src/index.ts"],
+      "@ai-ark/analysis": ["./packages/analysis/src/index.ts"],
+      "@ai-ark/classification": ["./packages/classification/src/index.ts"],
       "@ai-ark/config": ["./packages/config/src/index.ts"],
       "@ai-ark/contracts": ["./packages/contracts/src/index.ts"],
       "@ai-ark/github-source": ["./packages/github-source/src/index.ts"],
+      "@ai-ark/identity": ["./packages/identity/src/index.ts"],
       "@ai-ark/job-queue": ["./packages/job-queue/src/index.ts"],
       "@ai-ark/object-storage": ["./packages/object-storage/src/index.ts"],
       "@ai-ark/observability": ["./packages/observability/src/index.ts"],
