@@ -22,13 +22,16 @@ shared primitives
 
 Infrastructure adapters depend inward and implement ports. Browser UI never imports persistence or provider adapters. See `DEPENDENCY_RULES.md`.
 
-## M00 package map
+## Implemented package map
 
 - `@ai-ark/contracts`: versioned enums, primitives, results, and provider-neutral ports.
 - `@ai-ark/config`: startup environment validation and safe redaction.
 - `@ai-ark/testing`: deterministic fakes, captures, fixture loading, object storage, and opt-in ephemeral PostgreSQL.
+- `@ai-ark/acquisition`, `@ai-ark/github-source`, `@ai-ark/object-storage`, `@ai-ark/job-queue`, and `@ai-ark/observability`: the M01 immutable provider-API acquisition boundary and infrastructure adapters.
+- `@ai-ark/analysis`, `@ai-ark/classification`, and `@ai-ark/identity`: the M02 classification, bounded analysis, candidate-root, and stable identity boundary.
+- `@ai-ark/extraction`: the M03 deterministic/AI-assisted structured-extraction application layer, including provenance, field reconciliation, limits, and immutable bundle construction.
 
-Feature packages and apps are intentionally deferred to their milestones.
+Apps and M04+ feature packages remain deferred to their owning milestones.
 
 ## Data and infrastructure direction
 

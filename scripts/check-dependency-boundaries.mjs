@@ -4,12 +4,15 @@ import { join } from "node:path";
 const allowed = new Map([
   ["@ai-ark/analysis", new Set(["@ai-ark/classification", "@ai-ark/contracts"])],
   ["@ai-ark/contracts", new Set()],
+  ["@ai-ark/extraction", new Set(["@ai-ark/contracts"])],
   ["@ai-ark/config", new Set(["@ai-ark/contracts"])],
   [
     "@ai-ark/testing",
     new Set([
       "@ai-ark/acquisition",
+      "@ai-ark/analysis",
       "@ai-ark/contracts",
+      "@ai-ark/extraction",
       "@ai-ark/github-source",
       "@ai-ark/identity",
       "@ai-ark/job-queue",
@@ -58,5 +61,5 @@ if (failures.length > 0) {
   console.error(failures.join("\n"));
   process.exitCode = 1;
 } else {
-  console.log(`Dependency boundaries valid for ${allowed.size} M00-M02 packages.`);
+  console.log(`Dependency boundaries valid for ${allowed.size} M00-M03 packages.`);
 }
