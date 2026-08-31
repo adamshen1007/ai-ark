@@ -8,6 +8,7 @@
       "@ai-ark/classification": ["./packages/classification/src/index.ts"],
       "@ai-ark/config": ["./packages/config/src/index.ts"],
       "@ai-ark/contracts": ["./packages/contracts/src/index.ts"],
+      "@ai-ark/extraction": ["./packages/extraction/src/index.ts"],
       "@ai-ark/github-source": ["./packages/github-source/src/index.ts"],
       "@ai-ark/identity": ["./packages/identity/src/index.ts"],
       "@ai-ark/job-queue": ["./packages/job-queue/src/index.ts"],
