@@ -15,6 +15,10 @@ describe("canonical contracts", () => {
     );
   });
 
+  it("preserves frozen M00 UTF-16 object-key ordering", () => {
+    expect(canonicalJson({ "\ue000": 1, "\u{10000}": 2 })).toBe('{"𐀀":2,"":1}');
+  });
+
   it("rejects non-finite canonical JSON numbers", () => {
     expect(() => canonicalJson(Number.NaN)).toThrow("non-finite");
   });
