@@ -22,6 +22,7 @@ export default defineConfig({
     environment: "node",
     include: ["packages/**/*.integration.test.ts"],
     passWithNoTests: true,
+    fileParallelism: false,
     sequence: { concurrent: false },
   },
 });

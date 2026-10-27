@@ -27,11 +27,15 @@ import {
   type CanonicalGuardIdentity,
 } from "./m02-human-projectors.js";
 import { buildReviewFamilyIntents, lockTypedRows, persistTypedCommand } from "./m02-typed-state.js";
+import { assertWriterAuthority } from "./postgres-writer-authority.js";
+import { guardedWriterClient } from "./postgres-writer-checkpoints.js";
 
 export type { ManualResolutionEnvelope, ManualResolutionResult } from "@ai-ark/identity";
 
 export interface PostgresManualResolutionOptions {
   readonly schema?: string;
+  readonly loginRole?: string;
+  readonly peerLoginRole?: string;
   readonly serializationRetries?: number;
   readonly onAttemptOpened?: (attempt: number) => void | Promise<void>;
   readonly onRetry?: (attempt: number, error: unknown) => void | Promise<void>;
@@ -340,6 +344,9 @@ function durableError(error: unknown): ManualResolutionError {
 export class PostgresManualResolutionAdapter {
   private readonly schema: string;
   private readonly serializationRetries: number;
+  private readonly loginRole: string;
+  private readonly peerLoginRole: string;
+  private catalogIdentity: string | undefined;
   private readonly onAttemptOpened: ((attempt: number) => void | Promise<void>) | undefined;
   private readonly onRetry: ((attempt: number, error: unknown) => void | Promise<void>) | undefined;
   private readonly onUniqueViolation:
@@ -351,11 +358,52 @@ export class PostgresManualResolutionAdapter {
     options: PostgresManualResolutionOptions = {},
   ) {
     this.schema = assertSchema(options.schema ?? "public");
+    this.loginRole = options.loginRole ?? "ai_ark_m01_m02_login";
+    assertSchema(this.loginRole);
+    this.peerLoginRole = options.peerLoginRole ?? "";
+    if (this.peerLoginRole !== "") assertSchema(this.peerLoginRole);
     this.serializationRetries = options.serializationRetries ?? 2;
     this.onAttemptOpened = options.onAttemptOpened;
     this.onRetry = options.onRetry;
     this.onUniqueViolation = options.onUniqueViolation;
     this.onPlanFinalized = options.onPlanFinalized;
+  }
+
+  static async open(
+    pool: Pool,
+    options: PostgresManualResolutionOptions = {},
+  ): Promise<PostgresManualResolutionAdapter> {
+    const adapter = new PostgresManualResolutionAdapter(pool, options);
+    const client = await adapter.checkout();
+    client.release();
+    return adapter;
+  }
+
+  private async checkout(): Promise<PoolClient> {
+    const client = await this.pool.connect();
+    try {
+      const identity = await assertWriterAuthority(
+        client,
+        this.schema,
+        this.loginRole,
+        this.catalogIdentity,
+        this.peerLoginRole,
+      );
+      if (identity === null) return client;
+      this.catalogIdentity ??= identity;
+      return guardedWriterClient(client, async () => {
+        await assertWriterAuthority(
+          client,
+          this.schema,
+          this.loginRole,
+          this.catalogIdentity,
+          this.peerLoginRole,
+        );
+      });
+    } catch (error) {
+      client.release();
+      throw error;
+    }
   }
 
   async execute(command: ManualResolutionEnvelope): Promise<ManualResolutionResult> {
@@ -426,7 +474,7 @@ export class PostgresManualResolutionAdapter {
     preflight: CommandPreflight | undefined,
     failedUnique: UniqueViolationEvidence,
   ): Promise<"RETRY" | ManualResolutionError> {
-    const client = await this.pool.connect();
+    const client = await this.checkout();
     try {
       await client.query(`SET search_path TO "${this.schema}"`);
       const accepted = await client.query<StoredCommandRow>(
@@ -526,7 +574,7 @@ export class PostgresManualResolutionAdapter {
     preflight: CommandPreflight | undefined,
   ): Promise<ManualResolutionError | undefined> {
     if (preflight === undefined) return undefined;
-    const client = await this.pool.connect();
+    const client = await this.checkout();
     try {
       await client.query(`SET search_path TO "${this.schema}"`);
       try {
@@ -544,7 +592,7 @@ export class PostgresManualResolutionAdapter {
     command: ManualResolutionEnvelope,
   ): Promise<Readonly<Record<string, number | null>>> {
     validateManualResolutionEnvelope(command);
-    const client = await this.pool.connect();
+    const client = await this.checkout();
     try {
       await client.query(`SET search_path TO "${this.schema}"`);
       const { requiredKeys } = await this.deriveTypedRequirements(client, command);
@@ -587,9 +635,10 @@ export class PostgresManualResolutionAdapter {
     fingerprint: string,
     preflight: CommandPreflight,
   ): Promise<ManualResolutionResult> {
-    const client = await this.pool.connect();
+    const client = await this.checkout();
     try {
       await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      await client.query(`SELECT "${this.schema}".m03_m04_lock_predecessor_exclusive()`);
       await client.query(`SET LOCAL search_path TO "${this.schema}"`);
 
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
@@ -610,6 +659,7 @@ export class PostgresManualResolutionAdapter {
         if (stored.result_payload === null) {
           throw new ManualResolutionError("PHANTOM_CONFLICT");
         }
+        if (this.catalogIdentity !== undefined) await client.query("SET CONSTRAINTS ALL IMMEDIATE");
         await client.query("COMMIT");
         return stored.result_payload;
       }
@@ -673,6 +723,7 @@ export class PostgresManualResolutionAdapter {
         lockedMode.expansionId,
       );
       await this.assertTypedPlanPostconditions(client, lockedPlan);
+      if (this.catalogIdentity !== undefined) await client.query("SET CONSTRAINTS ALL IMMEDIATE");
       await client.query("COMMIT");
       return result;
     } catch (error) {
@@ -688,7 +739,7 @@ export class PostgresManualResolutionAdapter {
     fingerprint: string,
     captureRejectionCommand: (command: ManualResolutionEnvelope) => void,
   ): Promise<CommandPreflight> {
-    const client = await this.pool.connect();
+    const client = await this.checkout();
     try {
       await client.query(`SET search_path TO "${this.schema}"`);
       const replay = await client.query<StoredCommandRow>(
@@ -1819,7 +1870,7 @@ export class PostgresManualResolutionAdapter {
         : identityFamily || topologyFamily || clarificationFamily
           ? (command.payload.jobId ?? null)
           : null;
-    const client = await this.pool.connect();
+    const client = await this.checkout();
     try {
       await client.query("BEGIN");
       await client.query(`SET LOCAL search_path TO "${this.schema}"`);
@@ -1852,6 +1903,7 @@ export class PostgresManualResolutionAdapter {
           jobId,
         ],
       );
+      if (this.catalogIdentity !== undefined) await client.query("SET CONSTRAINTS ALL IMMEDIATE");
       await client.query("COMMIT");
     } catch {
       await client.query("ROLLBACK");

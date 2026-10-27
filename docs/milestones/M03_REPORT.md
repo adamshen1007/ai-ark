@@ -2,18 +2,21 @@
 
 ## 1. Decision
 
-`CONDITIONAL GO — M03 REMEDIATION READY FOR FRESH INDEPENDENT WHOLE-PATCH REVIEW`
+`GO — M03 GOVERNANCE CLOSED`
 
-The approved M03 specification and the bounded whole-patch remediation instruction have been implemented. Fresh
-local verification is green. Commit readiness remains conditional on a new independent whole-patch review
-returning `GO — M03 COMMIT READY`. This report is local evidence, not independent acceptance, commit authorization,
-or publication authorization.
+The approved M03 specification and bounded whole-patch remediation were implemented, committed, verified by public
+CI, and merged through PR #1 on 2026-08-31. The merged PR body records the externally reported verdict
+`GO — M03 COMMIT READY`; the original reviewer transcript is not present in repository or GitHub review metadata,
+so this closeout does not relabel that verdict as independently reproducible public evidence. This closeout does
+not authorize M04 implementation, release, deployment, or product publication.
 
 ## 2. Authority and scope
 
 - Approved exact `docs/milestones/M03_SPEC.md` SHA-256:
   `3946c15149d08b15e50697dc83d746979f0b2a8a87abeb5dbb25a78809949f80`.
 - Authorized scope: M03 structured extraction against that exact specification.
+- Externally reported implementation verdict, recorded in merged PR #1: `GO — M03 COMMIT READY`.
+- Externally reported CI-remediation delta verdict, recorded in merged PR #1: `GO`.
 - Preserved M02 baseline: commit `c6bb0c298dbb386a3ddf1a5363b98a74f2bb6db7`; M02 specification and report
   remain byte-unchanged.
 - Preserved non-goals: no M03 migrations, M04 evidence binding or draft generation, editorial/publication flow,
@@ -21,13 +24,18 @@ or publication authorization.
 
 ## 3. Repository and publication state
 
-- Root: `<repository-root>`.
+- Root: repository root; reports and public evidence remain repository-relative and contain no secrets or personal
+  data.
 - Branch: `main`; intended base and upstream: local `main` / `origin/main`.
-- HEAD, local base, and upstream before publication: all
-  `c6bb0c298dbb386a3ddf1a5363b98a74f2bb6db7` (`+0/-0`).
-- Worktree: nine tracked files modified plus the M03 specification, report, contracts, analysis, extraction,
-  and integration files untracked. The index is unstaged.
-- Commit: not created. Push, PR, merge, tag, release, deployment, and publication: not performed.
+- M03 implementation commit: `1e48d8d3510734b562bfee802dd8389f9adc5edb`.
+- CI-remediation/head commit: `13f65836e450e42c653dcbf6a7b3c59c352ced54`.
+- Merge commit and current local/upstream baseline: `cd6116a41a83fe07ede8034abb816eacfa8d1b66`.
+- Pull request: [#1](https://github.com/adamshen1007/ai-ark/pull/1), merged into `main` on 2026-08-31.
+- Public CI: run `33422220807`, `verify` conclusion `SUCCESS` for head commit `13f6583...`.
+- Independent-review evidence boundary: PR #1 records both verdicts and exact implementation/head hashes, but has
+  no GitHub review/comment or repository artifact containing the original reviewer output.
+- Worktree before this documentation-only closeout: clean and synchronized with `origin/main`.
+- Tag, release, deployment, and product publication: not performed.
 
 ## 4. Runtime
 
@@ -584,27 +592,47 @@ modifications, 30 untracked files, and the baseline-exact M00 primitive hash.
   goldens prove both boundaries. `M03-EVIDENCE-01` showed that a v14-only submission could not independently prove
   the report-only v13-to-v14 delta. The exact retained v13 source-only packet is therefore required alongside the
   next packet for attributable historical reconstruction. Fresh acceptance of the post-v14 bytes remains pending.
+- After post-v14 remediation, the merged PR #1 body records the externally reported final verdict
+  `GO — M03 COMMIT READY` for implementation commit `1e48d8d3510734b562bfee802dd8389f9adc5edb` and a separate
+  externally reported `GO` for CI-remediation/head commit `13f65836e450e42c653dcbf6a7b3c59c352ced54`. Public CI run
+  `33422220807` then passed at that head and PR #1 merged as `cd6116a41a83fe07ede8034abb816eacfa8d1b66` on
+  2026-08-31. The original reviewer transcript/archive identity is not stored in the repository or GitHub review
+  metadata, so the verdict is retained as externally reported rather than independently reproducible from this
+  closeout alone.
 
 ## 10. Security, risks, and limitations
 
+- The separately approved M03/M04 handoff amendment does not rewrite the historical M03 V1 evidence above. Its
+  local implementation adds `M03_EXTRACTION_REQUEST_V2`, `M03_EXTRACTION_V2`, a shared strict complete
+  `M03M02InputProjectionV1` schema, a domain-separated projection fingerprint, and V2 output binding. `execute()`
+  is the normal V2 production entry point; `executeV1()` remains explicit for historical regression evidence.
+  Amended M04 accepts only schema-valid V2 bundles and rejects V1 before collision, freshness, replay, or
+  persistence access.
 - Acquired repository content is parsed as bounded inert data. It is never checked out, executed, imported,
   installed, interpreted, or promoted to system/tool instructions.
 - AI analysis remains provider-neutral, optional, bounded, attributable, and proposal-only. Required tests use a
   deterministic fake and do not claim live-provider evidence.
 - Fixture and fake-adapter evidence proves deterministic contracts and orchestration behavior; it is not
   live-provider, production, editorial, publication, or real-user evidence.
-- The implementation is uncommitted on `main` by explicit boundary. The independent reviewer must inspect tracked
-  and untracked files together; a branch-only committed diff would be incomplete.
+- The M03 implementation is merged and publicly CI-verified. The historical tracked/untracked candidate inventory
+  and independent whole-patch review remain recorded above; the merge state does not imply release or deployment.
+- The final independent verdict is externally reported in the merged PR body, not independently reproducible from
+  a durable reviewer transcript in this repository.
 - The pre-existing PostgreSQL deprecation warning remains a follow-up outside M03's no-migration scope.
 
 ## 11. Authorization and next gate
 
 - Local M03 bounded remediation and verification: complete.
-- Independent whole-patch acceptance: pending.
-- Commit authorization: not granted and not inferred.
-- Push, PR, merge, release, deploy, publication, and M04 authorization: not granted.
+- Independent whole-patch acceptance: externally reported as `GO — M03 COMMIT READY` in merged PR #1; original
+  reviewer evidence is unavailable in repository/GitHub review metadata.
+- Commit, push, PR, and merge: complete through PR #1.
+- Public CI verification: complete, run `33422220807` succeeded.
+- Release, deploy, and product publication: not performed or authorized.
+- M04 specification SHA-256 `f4de3bd80f5ace68def7399944b8778e9817991a036d985be089392e72999569` and
+  M03/M04 handoff amendment SHA-256 `74e30585b84efc23b11bf58aac3cb4b95850ace32761e75067f29185759e574c`
+  are approved, and their implementation was separately authorized.
+- Historical M03 V1 evidence remains unchanged. Newly produced M04-bindable M03 output uses the amendment's V2
+  request/result/bundle contract and retains the exact M02 input projection.
 
-Recommended next step: send a sanitized M03 review packet containing the approved spec hash, complete tracked and
-untracked inventory, implementation report, exact verification results, and explicit authorization boundaries to
-the independent reviewer. Apply only in-scope M03 remediation from that review. Stop on
-`GO — M03 COMMIT READY` or when a genuine human decision is required.
+Recommended next step: complete verification and independent R2 review of the exact local amended M04 candidate.
+Do not commit, publish, run a production migration, or begin M05 without separate authorization.

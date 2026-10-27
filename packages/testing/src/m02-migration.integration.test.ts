@@ -4,6 +4,9 @@ import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+// @ts-expect-error JavaScript migration module is exercised directly by this integration test.
+import { loadMigrations, renderMigrationSql } from "../../../scripts/db-common.mjs";
+
 import { canonicalJson, type JsonValue } from "@ai-ark/contracts";
 import { PostgresSystemIdentityAdapter } from "@ai-ark/job-queue";
 
@@ -18,11 +21,16 @@ const migration002Url = new URL(
   "../../job-queue/migrations/002_m02_classification_identity.sql",
   import.meta.url,
 );
+const migration003Url = new URL(
+  "../../job-queue/migrations/003_m04_evidence_binding.sql",
+  import.meta.url,
+);
 
 const harness = new EphemeralPostgresHarness();
 let postgresPool: Pool;
 let migration001 = "";
 let migration002 = "";
+let migration003 = "";
 
 const sha256 = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const canonicalPayload = (value: JsonValue) => Buffer.from(canonicalJson(value), "utf8");
@@ -73,9 +81,10 @@ async function insertHumanSubjectAudit(
 
 describe("M02 PostgreSQL migration integration", () => {
   beforeAll(async () => {
-    [migration001, migration002] = await Promise.all([
+    [migration001, migration002, migration003] = await Promise.all([
       readFile(migration001Url, "utf8"),
       readFile(migration002Url, "utf8"),
+      readFile(migration003Url, "utf8"),
     ]);
     postgresPool = await harness.start();
     await postgresPool.query("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public");
@@ -118,8 +127,16 @@ describe("M02 PostgreSQL migration integration", () => {
       } finally {
         await client.query("SET session_replication_role = 'origin'");
       }
-      await new PostgresSystemIdentityAdapter(pool, {
+      await client.query(
+        renderMigrationSql(
+          migration003,
+          "m02_p5_decision_semantics",
+          (await loadMigrations())[2]?.manifest,
+        ),
+      );
+      await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema: "m02_p5_decision_semantics",
+        peerLoginRole: "ai_ark_m04_login",
       }).execute({
         schemaVersion: "1",
         sourceSnapshotId: fixture.snapshotId,

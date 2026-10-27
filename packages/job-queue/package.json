@@ -21,6 +21,7 @@
   "dependencies": {
     "@ai-ark/classification": "workspace:*",
     "@ai-ark/contracts": "workspace:*",
+    "@ai-ark/evidence": "workspace:*",
     "@ai-ark/identity": "workspace:*",
     "pg": "8.22.0"
   },

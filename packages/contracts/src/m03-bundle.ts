@@ -10,6 +10,7 @@ import {
   M03_FIELD_KEYS,
   M03_POLICY_VERSIONS,
   M03_WARNING_CODES,
+  M03M02InputProjectionV1Schema,
   M03FieldKeySchema,
   M03WarningCodeSchema,
 } from "./m03.js";
@@ -27,6 +28,7 @@ import {
   canonicalizeSpdx,
   canonicalJsonM03 as canonicalJson,
   compareUnsignedUtf8,
+  containsOnlyUnicodeScalarStrings,
   textKey,
 } from "./m03-normalization.js";
 
@@ -718,6 +720,173 @@ export const StructuredExtractionBundleV1Schema = strictObject({
 
 export type StructuredExtractionBundleV1 = z.infer<typeof StructuredExtractionBundleV1Schema>;
 
+export function fingerprintM03M02InputProjectionV1(
+  m02InputProjection: z.infer<typeof M03M02InputProjectionV1Schema>,
+): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        schemaVersion: "M03_M02_INPUT_PROJECTION_FINGERPRINT_V1",
+        m02InputProjection,
+      }),
+    )
+    .digest("hex");
+}
+
+export function deriveM03ExtractionIdV2(value: {
+  readonly m02: {
+    readonly resourceVersionIdentityId: string;
+    readonly resourceVersionObservationId: string;
+  };
+  readonly inputFingerprint: string;
+  readonly analysisResultFingerprint: string;
+}): string {
+  return `ext_${createHash("sha256")
+    .update(
+      canonicalJson({
+        schemaVersion: "M03_EXTRACTION_V2",
+        resourceVersionIdentityId: value.m02.resourceVersionIdentityId,
+        resourceVersionObservationId: value.m02.resourceVersionObservationId,
+        inputFingerprint: value.inputFingerprint,
+        analysisResultFingerprint: value.analysisResultFingerprint,
+      }),
+    )
+    .digest("hex")}`;
+}
+
+export const StructuredExtractionBundleV2Schema = strictObject({
+  ...StructuredExtractionBundleV1Schema.shape,
+  schemaVersion: z.literal("M03_EXTRACTION_V2"),
+  m02InputProjection: M03M02InputProjectionV1Schema,
+  m02InputProjectionFingerprint: sha256,
+}).superRefine((value, context) => {
+  if (!containsOnlyUnicodeScalarStrings(value)) {
+    context.addIssue({ code: "custom", message: "M03 bundle contains invalid Unicode scalar" });
+    return;
+  }
+  const {
+    m02InputProjection: _projection,
+    m02InputProjectionFingerprint: _projectionHash,
+    ...v1
+  } = value;
+  void _projection;
+  void _projectionHash;
+  const historicalValidation = StructuredExtractionBundleV1Schema.safeParse({
+    ...v1,
+    schemaVersion: "M03_EXTRACTION_V1",
+  });
+  if (!historicalValidation.success)
+    context.addIssue({ code: "custom", message: "inherited M03 bundle invariant failed" });
+  const projection = value.m02InputProjection;
+  const mismatch = (ok: boolean, message: string) => {
+    if (!ok) context.addIssue({ code: "custom", message });
+  };
+  mismatch(
+    value.m02InputProjectionFingerprint === fingerprintM03M02InputProjectionV1(projection),
+    "M02 input projection fingerprint mismatch",
+  );
+  mismatch(value.extractionId === deriveM03ExtractionIdV2(value), "extraction identity mismatch");
+  const mappings: readonly (readonly [unknown, unknown])[] = [
+    [value.m02.handoffMarkerId, projection.handoff.id],
+    [value.m02.controllingM02JobId, projection.m02Job.id],
+    [value.m02.identityDecisionId, projection.identityDecision.id],
+    [value.m02.m02ReviewStateId, projection.candidateReviewState.id],
+    [value.m02.resourceCandidateId, projection.candidate.id],
+    [value.m02.resourceIdentityId, projection.resourceIdentity.id],
+    [value.m02.resourceVersionIdentityId, projection.resourceVersionIdentity.id],
+    [value.m02.resourceVersionObservationId, projection.observation.id],
+    [value.m02.resourceSourceLinkId, projection.sourceLink.id],
+    [value.m02.sourceRepositoryId, projection.sourceRepository.id],
+    [value.m02.candidateRootId, projection.candidateRoot.id],
+    [value.m02.sourceSnapshotId, projection.observation.sourceSnapshotId],
+    [value.m02.sourceRevision, projection.observation.immutableRevision],
+    [value.m02.candidateContentFingerprint, projection.candidate.candidateContentFingerprint],
+    [
+      value.m02.firstObservedSourceSnapshotId,
+      projection.resourceVersionIdentity.firstObservedSourceSnapshotId,
+    ],
+    [
+      value.m02.firstObservedSourceRevision,
+      projection.resourceVersionIdentity.firstObservedSourceRevision,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.acquisitionJob,
+      projection.acquisitionJob.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.controllingM02Job,
+      projection.m02Job.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.handoffMarker,
+      projection.handoff.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.candidate,
+      projection.candidate.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.resourceIdentity,
+      projection.resourceIdentity.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.resourceVersionIdentity,
+      projection.resourceVersionIdentity.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.resourceSourceLink,
+      projection.sourceLink.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.sourceRepositoryIdentity,
+      projection.sourceRepository.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.identityDecision,
+      projection.identityDecision.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.candidateReviewState,
+      projection.candidateReviewState.recordVersion,
+    ],
+    [
+      value.expectedPredecessorState.mutableRecordVersions.candidateRoot,
+      projection.candidateRoot.recordVersion,
+    ],
+  ];
+  mismatch(
+    mappings.every(([actual, expected]) => actual === expected),
+    "M02 projection mapping mismatch",
+  );
+
+  const { outputFingerprint: _output, createdAt: _createdAt, ...withoutVolatile } = value;
+  void _output;
+  void _createdAt;
+  const logicalBundle = {
+    ...withoutVolatile,
+    analysisAttempts: withoutVolatile.analysisAttempts.map(
+      ({
+        durationMsOrNull: _duration,
+        tokenCountsOrNull: _tokens,
+        providerRequestIdOrNull: _provider,
+        ...attempt
+      }) => {
+        void _duration;
+        void _tokens;
+        void _provider;
+        return attempt;
+      },
+    ),
+  };
+  mismatch(
+    value.outputFingerprint ===
+      createHash("sha256").update(canonicalJson(logicalBundle)).digest("hex"),
+    "V2 output fingerprint mismatch",
+  );
+});
+
+export type StructuredExtractionBundleV2 = z.infer<typeof StructuredExtractionBundleV2Schema>;
+
 const nonnegativeInteger = z.number().int().nonnegative();
 const fieldCountMapSchema = z
   .record(M03FieldKeySchema, nonnegativeInteger)
@@ -903,9 +1072,30 @@ const bundleResult = strictObject({
     context.addIssue({ code: "custom", message: "outer extraction id mismatch" });
 });
 
+const bundleResultV2 = strictObject({
+  kind: z.literal("BUNDLE"),
+  requestFingerprint: sha256,
+  extractionId: contentId("ext_"),
+  bundle: StructuredExtractionBundleV2Schema,
+}).superRefine((value, context) => {
+  if (value.requestFingerprint !== value.bundle.requestFingerprint)
+    context.addIssue({ code: "custom", message: "outer request fingerprint mismatch" });
+  if (value.extractionId !== value.bundle.extractionId)
+    context.addIssue({ code: "custom", message: "outer extraction id mismatch" });
+});
+
 export const ExtractionCommandResultV1Schema = z.union([
   invalidRequestResult,
   bundleResult,
+  rejectedResult,
+  failedResult,
+  cancelledResult,
+  supersededResult,
+]);
+
+export const ExtractionCommandResultV2Schema = z.union([
+  invalidRequestResult,
+  bundleResultV2,
   rejectedResult,
   failedResult,
   cancelledResult,
@@ -916,3 +1106,4 @@ export type ObservedCountsV1 = z.infer<typeof ObservedCountsV1Schema>;
 export type SafeContextV1 = z.infer<typeof SafeContextV1Schema>;
 export type ExtractionDiagnosticV1 = z.infer<typeof ExtractionDiagnosticV1Schema>;
 export type ExtractionCommandResultV1 = z.infer<typeof ExtractionCommandResultV1Schema>;
+export type ExtractionCommandResultV2 = z.infer<typeof ExtractionCommandResultV2Schema>;

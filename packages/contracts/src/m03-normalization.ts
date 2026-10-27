@@ -5,6 +5,27 @@ import { defaultCaseFoldUnicode15_1 } from "./m03-unicode-15-1.js";
 const unicodeWhitespace = /\p{White_Space}+/gu;
 const unicodeWhitespaceAtEdges = /^\p{White_Space}+|\p{White_Space}+$/gu;
 
+export function containsOnlyUnicodeScalars(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+export function containsOnlyUnicodeScalarStrings(value: unknown): boolean {
+  if (typeof value === "string") return containsOnlyUnicodeScalars(value);
+  if (Array.isArray(value)) return value.every(containsOnlyUnicodeScalarStrings);
+  if (value === null || typeof value !== "object") return true;
+  return Object.entries(value).every(
+    ([key, nested]) => containsOnlyUnicodeScalars(key) && containsOnlyUnicodeScalarStrings(nested),
+  );
+}
+
 function defaultCaseFold(value: string): string {
   return defaultCaseFoldUnicode15_1(value);
 }

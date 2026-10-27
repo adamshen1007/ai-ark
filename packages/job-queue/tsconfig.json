@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "composite": true, "rootDir": "src" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../contracts" }, { "path": "../identity" }]
+  "references": [{ "path": "../contracts" }, { "path": "../evidence" }, { "path": "../identity" }]
 }

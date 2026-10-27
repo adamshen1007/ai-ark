@@ -30,8 +30,10 @@ Infrastructure adapters depend inward and implement ports. Browser UI never impo
 - `@ai-ark/acquisition`, `@ai-ark/github-source`, `@ai-ark/object-storage`, `@ai-ark/job-queue`, and `@ai-ark/observability`: the M01 immutable provider-API acquisition boundary and infrastructure adapters.
 - `@ai-ark/analysis`, `@ai-ark/classification`, and `@ai-ark/identity`: the M02 classification, bounded analysis, candidate-root, and stable identity boundary.
 - `@ai-ark/extraction`: the M03 deterministic/AI-assisted structured-extraction application layer, including provenance, field reconciliation, limits, and immutable bundle construction.
+- `@ai-ark/evidence`: the M04 deterministic evidence/Claim projection, completeness, binding service, and inward-owned persistence port.
+- `@ai-ark/job-queue`: also implements the M04 PostgreSQL evidence-persistence port and owns the forward-only migration ledger and validator.
 
-Apps and M04+ feature packages remain deferred to their owning milestones.
+Apps and M05+ feature packages remain deferred to their owning milestones.
 
 ## Data and infrastructure direction
 
@@ -48,3 +50,4 @@ Apps and M04+ feature packages remain deferred to their owning milestones.
 - Publication snapshots are immutable and corrected through supersession.
 - Uncertainty is represented explicitly.
 - Projections are reproducible from canonical records.
+- Accepted M03 bundles, EvidenceItems, Claims, links, completeness snapshots, and binding results are immutable, hash-checked, and closed over one source snapshot and ResourceVersion lineage.

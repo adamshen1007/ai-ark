@@ -13,8 +13,8 @@
   "scripts": {
     "build": "turbo run build",
     "clean": "turbo run clean",
-    "db:migrate": "node scripts/scoped-command.mjs db:migrate",
-    "db:validate": "node scripts/scoped-command.mjs db:validate",
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "db:validate": "node scripts/db-validate.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . && pnpm lint:boundaries && pnpm lint:source-safety",
@@ -30,13 +30,14 @@
     "typecheck": "turbo run typecheck",
     "validation:report": "node scripts/scoped-command.mjs validation:report",
     "validation:technical": "node scripts/scoped-command.mjs validation:technical",
-    "verify": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test:unit && pnpm test:contract && pnpm build"
+    "verify": "pnpm build && pnpm lint && pnpm format:check && pnpm typecheck && pnpm test:unit && pnpm test:contract"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/node": "26.1.2",
     "eslint": "10.8.0",
     "globals": "17.9.0",
+    "pg": "8.22.0",
     "prettier": "3.9.6",
     "turbo": "2.10.8",
     "tsx": "4.23.5",

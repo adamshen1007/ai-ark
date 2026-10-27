@@ -333,7 +333,7 @@ describe("M03 in-memory orchestration", () => {
       policyArtifacts: policyArtifacts(),
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const result = await orchestrator.execute(Buffer.from("{"), async () => {
+    const result = await orchestrator.executeV1(Buffer.from("{"), async () => {
       reads += 1;
       return { predecessor, source, checkControl: async () => predecessor };
     });
@@ -357,11 +357,14 @@ describe("M03 in-memory orchestration", () => {
       acquisitionCompleted: false,
       candidateResolved: false,
     };
-    const result = await orchestrator.execute(Buffer.from(JSON.stringify(request())), async () => ({
-      predecessor: ineligiblePredecessor,
-      source,
-      checkControl: async () => ineligiblePredecessor,
-    }));
+    const result = await orchestrator.executeV1(
+      Buffer.from(JSON.stringify(request())),
+      async () => ({
+        predecessor: ineligiblePredecessor,
+        source,
+        checkControl: async () => ineligiblePredecessor,
+      }),
+    );
     expect(result).toMatchObject({ kind: "REJECTED", errorCode: "M02_HANDOFF_NOT_FOUND" });
   });
 
@@ -410,7 +413,7 @@ describe("M03 in-memory orchestration", () => {
       },
     ];
     for (const [index, invalid] of invalidRequests.entries()) {
-      const result = await orchestrator.execute(
+      const result = await orchestrator.executeV1(
         Buffer.from(
           JSON.stringify({ ...invalid, idempotencyKey: `expected-invalid-${String(index)}` }),
         ),
@@ -425,7 +428,7 @@ describe("M03 in-memory orchestration", () => {
       '"acquisitionJob":"1"',
       '"acquisitionJob":"1","acquisition\\u004aob":"2"',
     );
-    const duplicateResult = await orchestrator.execute(Buffer.from(duplicateRaw), load);
+    const duplicateResult = await orchestrator.executeV1(Buffer.from(duplicateRaw), load);
     expect(duplicateResult).toMatchObject({
       kind: "REJECTED",
       errorCode: "EXPECTED_VERSION_SET_INVALID",
@@ -443,8 +446,8 @@ describe("M03 in-memory orchestration", () => {
       reads += 1;
       return { predecessor, source, checkControl: async () => predecessor };
     };
-    const first = await orchestrator.execute(Buffer.from(JSON.stringify(request())), load);
-    const replay = await orchestrator.execute(Buffer.from(JSON.stringify(request())), load);
+    const first = await orchestrator.executeV1(Buffer.from(JSON.stringify(request())), load);
+    const replay = await orchestrator.executeV1(Buffer.from(JSON.stringify(request())), load);
     expect(first).toMatchObject({
       kind: "BUNDLE",
       requestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
@@ -474,7 +477,7 @@ describe("M03 in-memory orchestration", () => {
       policyArtifacts: policyArtifacts(),
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const first = await orchestrator.execute(
+    const first = await orchestrator.executeV1(
       Buffer.from(JSON.stringify(request("rejected-key"))),
       async () => {
         reads += 1;
@@ -486,14 +489,14 @@ describe("M03 in-memory orchestration", () => {
         };
       },
     );
-    const replay = await orchestrator.execute(
+    const replay = await orchestrator.executeV1(
       Buffer.from(JSON.stringify(request("rejected-key"))),
       async () => {
         reads += 1;
         return { predecessor, source, checkControl: async () => predecessor };
       },
     );
-    const fresh = await orchestrator.execute(
+    const fresh = await orchestrator.executeV1(
       Buffer.from(JSON.stringify(request("fresh-key"))),
       async () => {
         reads += 1;
@@ -521,8 +524,8 @@ describe("M03 in-memory orchestration", () => {
       await blocked;
       return { predecessor, source, checkControl: async () => predecessor };
     };
-    const first = orchestrator.execute(Buffer.from(JSON.stringify(request())), load);
-    const second = orchestrator.execute(Buffer.from(JSON.stringify(request())), load);
+    const first = orchestrator.executeV1(Buffer.from(JSON.stringify(request())), load);
+    const second = orchestrator.executeV1(Buffer.from(JSON.stringify(request())), load);
     releaseLoad?.();
     const [firstResult, secondResult] = await Promise.all([first, second]);
     expect(secondResult).toEqual(firstResult);
@@ -534,7 +537,7 @@ describe("M03 in-memory orchestration", () => {
       policyArtifacts: policyArtifacts(),
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const cancelledResult = await cancelled.execute(
+    const cancelledResult = await cancelled.executeV1(
       Buffer.from(JSON.stringify(request("cancelled"))),
       async () => ({
         predecessor,
@@ -549,7 +552,7 @@ describe("M03 in-memory orchestration", () => {
       policyArtifacts: policyArtifacts(),
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const supersededResult = await superseded.execute(
+    const supersededResult = await superseded.executeV1(
       Buffer.from(JSON.stringify(request("superseded"))),
       async () => ({
         predecessor,
@@ -610,7 +613,7 @@ describe("M03 in-memory orchestration", () => {
         policyArtifacts: policyArtifacts(),
         now: () => "2026-08-25T00:00:00.000Z",
       });
-      const result = await orchestrator.execute(
+      const result = await orchestrator.executeV1(
         Buffer.from(JSON.stringify(request(`freshness-${String(index)}`))),
         async () => ({ predecessor, source, checkControl: async () => drifted }),
       );
@@ -626,7 +629,7 @@ describe("M03 in-memory orchestration", () => {
       hashForTesting: (domain, bytes) =>
         domain === "REQUEST" ? constant : createHash("sha256").update(bytes).digest("hex"),
     });
-    await requestCollision.execute(
+    await requestCollision.executeV1(
       Buffer.from(JSON.stringify(request("collision-a"))),
       async () => ({ predecessor, source, checkControl: async () => predecessor }),
     );
@@ -634,7 +637,7 @@ describe("M03 in-memory orchestration", () => {
       ...request("collision-b"),
       sourceRepositoryId: "repository-2",
     };
-    const requestCollisionResult = await requestCollision.execute(
+    const requestCollisionResult = await requestCollision.executeV1(
       Buffer.from(JSON.stringify(changedRequest)),
       async () => ({ predecessor, source, checkControl: async () => predecessor }),
     );
@@ -656,7 +659,7 @@ describe("M03 in-memory orchestration", () => {
       hashForTesting: (domain, bytes) =>
         domain === "REQUEST" ? constant : createHash("sha256").update(bytes).digest("hex"),
     });
-    const firstInvalid = await invalidRequestCollision.execute(
+    const firstInvalid = await invalidRequestCollision.executeV1(
       Buffer.from(
         JSON.stringify({
           ...request("invalid-expected-first"),
@@ -669,7 +672,7 @@ describe("M03 in-memory orchestration", () => {
       kind: "REJECTED",
       errorCode: "EXPECTED_VERSION_SET_INVALID",
     });
-    const secondInvalid = await invalidRequestCollision.execute(
+    const secondInvalid = await invalidRequestCollision.executeV1(
       Buffer.from(
         JSON.stringify({
           ...request("invalid-expected-second"),
@@ -690,12 +693,12 @@ describe("M03 in-memory orchestration", () => {
       hashForTesting: (domain, bytes) =>
         domain === "INPUT" ? constant : createHash("sha256").update(bytes).digest("hex"),
     });
-    await inputCollision.execute(Buffer.from(JSON.stringify(request("input-a"))), async () => ({
+    await inputCollision.executeV1(Buffer.from(JSON.stringify(request("input-a"))), async () => ({
       predecessor,
       source,
       checkControl: async () => predecessor,
     }));
-    const inputCollisionResult = await inputCollision.execute(
+    const inputCollisionResult = await inputCollision.executeV1(
       Buffer.from(JSON.stringify({ ...request("input-b"), sourceSnapshotId: "snapshot-2" })),
       async () => {
         const currentPredecessor = { ...predecessor, snapshotMatches: true };
@@ -736,7 +739,7 @@ describe("M03 in-memory orchestration", () => {
         hashForTesting: (domain, bytes) =>
           domain === domainUnderTest ? constant : createHash("sha256").update(bytes).digest("hex"),
       });
-      const first = await orchestrator.execute(
+      const first = await orchestrator.executeV1(
         Buffer.from(JSON.stringify(request(`input-layer-first-${domainUnderTest}`))),
         async () => ({ predecessor, source, checkControl: async () => predecessor }),
       );
@@ -801,7 +804,7 @@ describe("M03 in-memory orchestration", () => {
         };
         changedSource = source;
       }
-      const collision = await orchestrator.execute(
+      const collision = await orchestrator.executeV1(
         Buffer.from(JSON.stringify(changedRequest)),
         async () => ({
           predecessor,
@@ -822,7 +825,7 @@ describe("M03 in-memory orchestration", () => {
         domain === "POLICY_ARTIFACT" ? constant : createHash("sha256").update(bytes).digest("hex"),
     });
     await expect(
-      policyCollision.execute(
+      policyCollision.executeV1(
         Buffer.from(JSON.stringify(request("input-layer-policy"))),
         async () => ({ predecessor, source, checkControl: async () => predecessor }),
       ),
@@ -849,7 +852,7 @@ describe("M03 in-memory orchestration", () => {
             ? "f".repeat(64)
             : createHash("sha256").update(bytes).digest("hex"),
       });
-      const result = await orchestrator.execute(
+      const result = await orchestrator.executeV1(
         Buffer.from(JSON.stringify(request(`nested-${domainUnderTest}`))),
         async () => ({ predecessor, source, checkControl: async () => predecessor }),
       );
@@ -866,7 +869,7 @@ describe("M03 in-memory orchestration", () => {
         policyArtifacts: policyArtifacts(),
         now: () => "2026-08-25T00:00:00.000Z",
       });
-      return orchestrator.execute(
+      return orchestrator.executeV1(
         Buffer.from(JSON.stringify(request("projection-binding"))),
         async () => {
           const currentPredecessor = {
@@ -904,7 +907,7 @@ describe("M03 in-memory orchestration", () => {
       policyArtifacts: policyArtifacts(),
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const result = await orchestrator.execute(
+    const result = await orchestrator.executeV1(
       Buffer.from(JSON.stringify(request("deterministic-value-bound"))),
       async () => ({
         predecessor,
@@ -939,7 +942,7 @@ describe("M03 in-memory orchestration", () => {
       now: () => "2026-08-25T00:00:00.000Z",
     });
     const execute = async (length: number) =>
-      orchestrator.execute(
+      orchestrator.executeV1(
         Buffer.from(JSON.stringify(request(`provider-repository-id-${String(length)}`))),
         async () => ({
           predecessor,
@@ -1006,7 +1009,7 @@ describe("M03 in-memory orchestration", () => {
         now: () => "2026-08-25T00:00:00.000Z",
       });
       const execute = async (suffix: string, content: string) =>
-        orchestrator.execute(
+        orchestrator.executeV1(
           Buffer.from(JSON.stringify(request(`${boundary.label}-${suffix}`))),
           async () => ({
             predecessor,
