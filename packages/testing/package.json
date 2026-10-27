@@ -21,6 +21,7 @@
     "@ai-ark/acquisition": "workspace:*",
     "@ai-ark/analysis": "workspace:*",
     "@ai-ark/contracts": "workspace:*",
+    "@ai-ark/evidence": "workspace:*",
     "@ai-ark/extraction": "workspace:*",
     "@ai-ark/github-source": "workspace:*",
     "@ai-ark/identity": "workspace:*",

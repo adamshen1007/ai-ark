@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 
 import { canonicalM02JsonBytes, type CanonicalM02Value } from "@ai-ark/classification";
 import { createExternalIdentifierKey } from "@ai-ark/identity";
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 
 import { allocateM02Id } from "./m02-human-command-plan.js";
 import { canonicalGuard, type CanonicalGuardIdentity } from "./m02-human-projectors.js";
+import { assertWriterAuthority } from "./postgres-writer-authority.js";
+import { guardedWriterClient } from "./postgres-writer-checkpoints.js";
 
 export const SYSTEM_IDENTITY_PROJECTOR_MODE_IDS = [
   "S1_R0_JC",
@@ -190,6 +192,8 @@ export interface SystemIdentityMutationResultV1 {
 
 export interface PostgresSystemIdentityOptions {
   readonly schema?: string;
+  readonly loginRole?: string;
+  readonly peerLoginRole?: string;
   readonly serializationRetries?: number;
   readonly idAllocator?: () => string;
   readonly onFrozen?: (
@@ -201,6 +205,7 @@ export interface PostgresSystemIdentityOptions {
     }>,
   ) => void | Promise<void>;
   readonly onTransactionAttempt?: (attempt: number, client: PoolClient) => void | Promise<void>;
+  readonly onTransactionRollback?: (attempt: number, error: unknown) => void | Promise<void>;
   readonly onPlanFrozen?: (
     plan: Readonly<{
       concurrencyPlanFingerprint: string;
@@ -1649,6 +1654,9 @@ const SYSTEM_PLAN_CREATE_ORDER: Readonly<Record<string, number>> = Object.freeze
  */
 export class PostgresSystemIdentityAdapter {
   private readonly schema: string;
+  private readonly loginRole: string;
+  private readonly peerLoginRole: string;
+  private catalogIdentity: string | undefined;
   private readonly maxAttempts: number;
 
   public constructor(
@@ -1657,13 +1665,67 @@ export class PostgresSystemIdentityAdapter {
   ) {
     this.schema = options.schema ?? "public";
     if (!SCHEMA_NAME.test(this.schema)) throw new Error("INVALID_SCHEMA");
+    this.loginRole = options.loginRole ?? "ai_ark_m01_m02_login";
+    if (!SCHEMA_NAME.test(this.loginRole)) throw new Error("INVALID_ROLE");
+    this.peerLoginRole = options.peerLoginRole ?? "";
+    if (this.peerLoginRole !== "" && !SCHEMA_NAME.test(this.peerLoginRole))
+      throw new Error("INVALID_ROLE");
     this.maxAttempts = Math.min(3, Math.max(1, (options.serializationRetries ?? 2) + 1));
+  }
+
+  public static async open(
+    pool: Pool,
+    options: PostgresSystemIdentityOptions = {},
+  ): Promise<PostgresSystemIdentityAdapter> {
+    const adapter = new PostgresSystemIdentityAdapter(pool, options);
+    const client = await adapter.checkout();
+    client.release();
+    return adapter;
+  }
+
+  private async checkout(): Promise<PoolClient> {
+    const client = await this.pool.connect();
+    try {
+      const identity = await assertWriterAuthority(
+        client,
+        this.schema,
+        this.loginRole,
+        this.catalogIdentity,
+        this.peerLoginRole,
+      );
+      if (identity === null) return client;
+      this.catalogIdentity ??= identity;
+      return guardedWriterClient(client, async () => {
+        await assertWriterAuthority(
+          client,
+          this.schema,
+          this.loginRole,
+          this.catalogIdentity,
+          this.peerLoginRole,
+        );
+      });
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+  }
+
+  private async queryAuthority<T extends QueryResultRow>(
+    sql: string,
+    values: readonly unknown[] = [],
+  ): Promise<QueryResult<T>> {
+    const client = await this.checkout();
+    try {
+      return await client.query<T>(sql, [...values]);
+    } finally {
+      client.release();
+    }
   }
 
   private async loadPreProjectorContext(
     request: SystemIdentityMutationRequestV1,
   ): Promise<PreProjectorContext> {
-    const result = await this.pool.query<PreProjectorContext>(
+    const result = await this.queryAuthority<PreProjectorContext>(
       `SELECT candidate.source_snapshot_id,review.id AS review_id,
          acquisition.status AS acquisition_status,acquisition.cancellation_requested,
          job.supersession_state
@@ -1710,7 +1772,7 @@ export class PostgresSystemIdentityAdapter {
         "EXPECTED_VERSION_SET_INVALID",
         "POST_PROJECTOR_PRE_ALLOCATION",
       );
-    const ownedClient = existingClient === undefined ? await this.pool.connect() : undefined;
+    const ownedClient = existingClient === undefined ? await this.checkout() : undefined;
     const client = existingClient ?? requiredValue(ownedClient);
     try {
       if (existingClient === undefined)
@@ -2749,9 +2811,10 @@ export class PostgresSystemIdentityAdapter {
       });
       lastAttempt = { derived: preflightDerived, context: preflight, frozen };
       attemptCount += 1;
-      const client = await this.pool.connect();
+      const client = await this.checkout();
       try {
         await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+        await client.query(`SELECT "${this.schema}".m03_m04_lock_predecessor_exclusive()`);
         await client.query(`SET LOCAL search_path TO ${this.schema}, public`);
         await client.query("SET CONSTRAINTS ALL DEFERRED");
         await this.options.onTransactionAttempt?.(attemptCount, client);
@@ -2783,6 +2846,7 @@ export class PostgresSystemIdentityAdapter {
         return resultFromRow(accepted, false, attemptCount);
       } catch (error) {
         await client.query("ROLLBACK").catch(() => undefined);
+        await this.options.onTransactionRollback?.(attemptCount, error);
         const databaseCode = (error as { code?: string }).code;
         if (databaseCode === "40001" || databaseCode === "23505") {
           const accepted = await this.lookupReplay(replay);
@@ -2889,7 +2953,7 @@ export class PostgresSystemIdentityAdapter {
   private async lookupReplay(
     locator: FrozenSystemIdentityReplayLocator,
   ): Promise<ResultRow | undefined> {
-    const result = await this.pool.query<ResultRow & { system_replay_locator_payload: Buffer }>(
+    const result = await this.queryAuthority<ResultRow & { system_replay_locator_payload: Buffer }>(
       `SELECT result.*, operation.system_replay_locator_payload
        FROM ${this.schema}.m02_system_identity_operations operation
        JOIN ${this.schema}.m02_system_identity_results result ON result.system_operation_id=operation.id
@@ -2904,7 +2968,7 @@ export class PostgresSystemIdentityAdapter {
   }
 
   private async lookupIdempotency(frozen: FrozenSystemOperation): Promise<ResultRow | undefined> {
-    const result = await this.pool.query<
+    const result = await this.queryAuthority<
       ResultRow & { idempotency_payload: Buffer; system_replay_locator_payload: Buffer }
     >(
       `SELECT result.*, operation.idempotency_payload, operation.system_replay_locator_payload
@@ -2943,7 +3007,7 @@ export class PostgresSystemIdentityAdapter {
       const guard = frozen.guards.find((candidate) => candidate.key === guardKey);
       if (guardKey === undefined || !guardKey.startsWith("guard:") || guard === undefined)
         return false;
-      const actual = await this.pool.query<{
+      const actual = await this.queryAuthority<{
         guard_type: string;
         canonical_payload: Buffer;
         payload_hash: string;
@@ -2968,7 +3032,7 @@ export class PostgresSystemIdentityAdapter {
       databaseError.constraint ===
       "m02_system_identity_operations_idempotency_scope_idempotency_key_key"
     ) {
-      const actual = await this.pool.query<{ idempotency_payload: Buffer }>(
+      const actual = await this.queryAuthority<{ idempotency_payload: Buffer }>(
         `SELECT idempotency_payload FROM ${this.schema}.m02_system_identity_operations
          WHERE idempotency_scope='M02_SYSTEM_IDENTITY_PROJECTION_V1' AND idempotency_key=$1`,
         [frozen.idempotencyKey],
@@ -2985,7 +3049,7 @@ export class PostgresSystemIdentityAdapter {
       databaseError.constraint ===
         "m02_system_identity_operations_system_replay_lookup_key_system_replay_locator_payload_key"
     ) {
-      const actual = await this.pool.query<{ system_replay_locator_payload: Buffer }>(
+      const actual = await this.queryAuthority<{ system_replay_locator_payload: Buffer }>(
         `SELECT system_replay_locator_payload
          FROM ${this.schema}.m02_system_identity_operations
          WHERE system_replay_lookup_key=$1`,
@@ -3003,7 +3067,7 @@ export class PostgresSystemIdentityAdapter {
   private async loadContext(
     request: DerivedSystemIdentityMutation,
   ): Promise<MutableIdentityContext> {
-    const client = await this.pool.connect();
+    const client = await this.checkout();
     try {
       await client.query(`SET search_path TO ${this.schema}, public`);
       return await this.queryContext(client, request);
@@ -4866,7 +4930,7 @@ export class PostgresSystemIdentityAdapter {
         : null,
     } as const;
     const canonical = canonicalPayload(rejectionContext);
-    const rejectionClient = await this.pool.connect();
+    const rejectionClient = await this.checkout();
     try {
       await rejectionClient.query("BEGIN");
       await rejectionClient.query(`SET LOCAL search_path TO ${this.schema}, public`);
@@ -4899,6 +4963,8 @@ export class PostgresSystemIdentityAdapter {
           canonical.fingerprint,
         ],
       );
+      if (this.catalogIdentity !== undefined)
+        await rejectionClient.query("SET CONSTRAINTS ALL IMMEDIATE");
       await rejectionClient.query("COMMIT");
     } catch (rejectionError) {
       await rejectionClient.query("ROLLBACK");

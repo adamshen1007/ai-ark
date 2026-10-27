@@ -16,9 +16,11 @@ import {
   type SystemIdentityProjectorModeId,
 } from "@ai-ark/job-queue";
 import { canonicalJson, type JsonValue } from "@ai-ark/contracts";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+// @ts-expect-error JavaScript migration module is exercised directly by this integration test.
+import { loadMigrations, renderMigrationSql } from "../../../scripts/db-common.mjs";
 import { EphemeralPostgresHarness } from "./postgres-harness.js";
 import { ExecutedReceiptCollector } from "./m02-executed-receipts.js";
 import {
@@ -51,6 +53,22 @@ const EXACT_SYSTEM_MODES = [
   "S9_JR",
   "S10_JR",
 ] as const satisfies readonly SystemIdentityProjectorModeId[];
+
+const writerManifest = (
+  (await loadMigrations())[2] as
+    | {
+        manifest?: {
+          groups: readonly {
+            role: string;
+            relations: readonly { name: string; operations: readonly string[] }[];
+            functions: readonly string[];
+            sequences: readonly { name: string; operations: readonly string[] }[];
+          }[];
+        };
+      }
+    | undefined
+)?.manifest?.groups.find(({ role }) => role === "M01_M02_WRITER_GROUP");
+if (writerManifest === undefined) throw new Error("M02_WRITER_MANIFEST_GROUP_MISSING");
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -160,10 +178,15 @@ const migration002Url = new URL(
   "../../job-queue/migrations/002_m02_classification_identity.sql",
   import.meta.url,
 );
+const migration003Url = new URL(
+  "../../job-queue/migrations/003_m04_evidence_binding.sql",
+  import.meta.url,
+);
 const harness = new EphemeralPostgresHarness();
 let pool: Pool;
 let migration001 = "";
 let migration002 = "";
+let migration003 = "";
 
 async function createSchema(schema: string): Promise<void> {
   const client = await pool.connect();
@@ -177,7 +200,63 @@ async function createSchema(schema: string): Promise<void> {
     client.release();
   }
   await seedM02ProductionGraph(pool, schema);
+  await pool.query(`SET search_path TO ${schema}, public`);
+  await pool.query(renderMigrationSql(migration003, schema, (await loadMigrations())[2]?.manifest));
 }
+
+/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/unbound-method */
+function rollbackAndCaptureSystemPool(
+  base: Pool,
+  deniedCodes: string[],
+  deniedMessages: string[],
+  deniedStatements?: { sql: string; code: string; rowId?: string }[],
+): Pool {
+  return {
+    connect: async () => {
+      const client = await base.connect();
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === "query")
+            return async (...args: unknown[]) => {
+              const query = args[0];
+              const sql =
+                typeof query === "string"
+                  ? query
+                  : typeof query === "object" && query !== null && "text" in query
+                    ? query.text
+                    : undefined;
+              try {
+                if (typeof sql === "string" && sql.trim() === "COMMIT") {
+                  await target.query("SET CONSTRAINTS ALL IMMEDIATE");
+                  throw new Error("M02_TEST_FORCED_ROLLBACK");
+                }
+                return await Reflect.apply(target.query, target, args);
+              } catch (error) {
+                const code = (error as { code?: unknown }).code;
+                if (typeof code === "string") {
+                  deniedCodes.push(code);
+                  if (typeof sql === "string") {
+                    const parameters = args[1];
+                    const rowId = Array.isArray(parameters) ? parameters[0] : undefined;
+                    deniedStatements?.push({
+                      sql,
+                      code,
+                      ...(typeof rowId === "string" ? { rowId } : {}),
+                    });
+                  }
+                }
+                if (error instanceof Error) deniedMessages.push(error.message);
+                throw error;
+              }
+            };
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+  } as unknown as Pool;
+}
+/* eslint-enable @typescript-eslint/no-unsafe-return, @typescript-eslint/unbound-method */
 
 async function updateImmutableFixtureResult(
   schema: string,
@@ -197,6 +276,59 @@ async function updateImmutableFixtureResult(
   } finally {
     client.release();
   }
+}
+
+async function seedP1P2Contradiction(
+  schema: string,
+  fixture: Awaited<ReturnType<typeof seedM02SystemIdentityGraph>>,
+): Promise<void> {
+  const externalPayload = Buffer.from(
+    canonicalJson({
+      identifierType: "DECLARED_MANIFEST_ID",
+      issuer: "github.com",
+      namespace: "system",
+      normalizationPolicyVersion: "external-id-v1",
+      normalizedValue: "contradictory-skill",
+      provider: "github",
+    }),
+    "utf8",
+  );
+  const contradictoryIdentityId = "00000000-0000-7000-8000-000000004081";
+  await pool.query("SET session_replication_role = 'replica'");
+  try {
+    await pool.query(
+      `INSERT INTO ${schema}.resource_identities
+         (id,status,created_at,record_version,guard_anchor_candidate_id,origin_type,
+          command_id,result_id,audit_event_id)
+       VALUES ($1,'ACTIVE',now(),1,$2,'HUMAN_COMMAND','command-seed','result-seed',
+         'audit-command-seed')`,
+      [contradictoryIdentityId, fixture.candidateId],
+    );
+    await pool.query(
+      `INSERT INTO ${schema}.external_identifiers
+         (id,resource_identity_id,provider,identifier_type,issuer,namespace,normalized_value,
+          normalization_policy_version,evidence_reference_id,canonical_key_hash,
+          canonical_key_payload,provenance,review_state,record_version)
+       VALUES ('00000000-0000-7000-8000-000000004082',$1,'github',
+         'DECLARED_MANIFEST_ID','github.com','system','contradictory-skill',
+         'external-id-v1',$2,$3,$4,'HUMAN_VERIFIED_SOURCE_DECLARATION','VERIFIED',1)`,
+      [
+        contradictoryIdentityId,
+        fixture.evidenceId,
+        createHash("sha256").update(externalPayload).digest("hex"),
+        externalPayload,
+      ],
+    );
+  } finally {
+    await pool.query("SET session_replication_role = 'origin'");
+  }
+  await updateImmutableFixtureResult(
+    schema,
+    `UPDATE acquisition_results
+     SET result=jsonb_set(result,'{identityDiscovery,trustedExternalIdentifierOrNull}',$1::jsonb)
+     WHERE job_id=$2`,
+    [externalPayload.toString("utf8"), fixture.jobId],
+  );
 }
 
 function decisionInput(overrides: Partial<IdentityDecisionInputV1> = {}): IdentityDecisionInputV1 {
@@ -262,9 +394,10 @@ function immutableProjectorRequest(
 
 describe("M02 PostgreSQL system identity projector", () => {
   beforeAll(async () => {
-    [migration001, migration002] = await Promise.all([
+    [migration001, migration002, migration003] = await Promise.all([
       readFile(migration001Url, "utf8"),
       readFile(migration002Url, "utf8"),
+      readFile(migration003Url, "utf8"),
     ]);
     pool = await harness.start();
   }, 60_000);
@@ -316,7 +449,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       "schemaVersion",
       "sourceSnapshotId",
     ]);
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(immutable);
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(immutable);
     expect(result.automaticProjectorModeId).toBe("S1_R0_JC");
     const operation = await pool.query<{
       automatic_projector_mode_id: string;
@@ -337,6 +473,317 @@ describe("M02 PostgreSQL system identity projector", () => {
     expect(SYSTEM_IDENTITY_PROJECTOR_MODE_IDS).toEqual(EXACT_SYSTEM_MODES);
     expect(new Set(SYSTEM_IDENTITY_PROJECTOR_MODE_IDS).size).toBe(22);
   });
+
+  describe("writer manifest system-identity privilege paths", () => {
+    const protectedOutcomeTables = [
+      "m02_system_identity_operations",
+      "m02_system_identity_results",
+      "m02_audit_events",
+      "m02_rejected_system_identity_audits",
+      "identity_decisions",
+      "external_identifiers",
+      "resource_identities",
+      "resource_version_identities",
+      "resource_version_observations",
+      "source_repository_identities",
+      "resource_source_links",
+    ] as const;
+    const rowLockModes: Partial<Record<string, SystemIdentityProjectorModeId>> = {
+      external_identifiers: "S4_R0_JC",
+      resource_identities: "S3_JC",
+      resource_version_identities: "S3_JC",
+      resource_version_observations: "S3_JC",
+      source_repository_identities: "S3_JC",
+    };
+    const systemTables = new Set([
+      "acquisition_results",
+      "analysis_runs",
+      "external_identifiers",
+      "identity_decision_conflict_evidence",
+      "identity_decision_conflict_targets",
+      "identity_decision_conflicts",
+      "identity_decision_signal_evidence",
+      "identity_decision_signals",
+      "identity_decision_tier_evaluations",
+      "m02_system_identity_operations",
+      "m02_system_identity_results",
+      "resource_identities",
+      "resource_version_identities",
+      "resource_version_observations",
+      "source_repository_identities",
+      "source_repository_urls",
+    ]);
+    const relationCells = writerManifest.relations.flatMap(({ name, operations }) => {
+      if (!systemTables.has(name)) return [];
+      return operations.flatMap((operation) => {
+        if (
+          [
+            "resource_identities",
+            "resource_version_identities",
+            "resource_version_observations",
+            "source_repository_identities",
+          ].includes(name) &&
+          operation !== "UPDATE" &&
+          !(name === "source_repository_identities" && operation === "INSERT")
+        )
+          return [];
+        const mode: SystemIdentityProjectorModeId =
+          operation === "UPDATE" && rowLockModes[name] !== undefined
+            ? rowLockModes[name]
+            : name === "identity_decision_conflict_targets" && operation === "INSERT"
+              ? "S3_JC"
+              : name.startsWith("identity_decision_conflict")
+                ? "S6_JR"
+                : name.startsWith("identity_decision_signal")
+                  ? "S7_JR"
+                  : name === "external_identifiers"
+                    ? "S3_JC"
+                    : name === "analysis_runs"
+                      ? "S1_R1_JC"
+                      : "S1_R0_JC";
+        return [{ name, operation, kind: "TABLE" as const, mode }];
+      });
+    });
+    const functionCells = writerManifest.functions.flatMap((signature) => {
+      if (
+        ![
+          "m02_identity_conflict_",
+          "m02_identity_decision_input_json",
+          "m02_identity_signal_sort_key",
+          "m02_system_",
+          "m02_tier_sequence_valid",
+          "m02_uuid_array_is_canonical",
+        ].some((prefix) => signature.startsWith(prefix)) ||
+        signature.startsWith("m02_system_rejection_targets_valid")
+      )
+        return [];
+      const mode: SystemIdentityProjectorModeId = signature.startsWith("m02_identity_conflict_")
+        ? "S6_JR"
+        : signature.startsWith("m02_identity_signal_sort_key")
+          ? "S7_JR"
+          : signature.startsWith("m02_system_s8_tier_semantics_valid")
+            ? "S8_JR"
+            : "S1_R0_JC";
+      return [{ name: signature, operation: "EXECUTE", kind: "FUNCTION" as const, mode }];
+    });
+    const cells = [...relationCells, ...functionCells].map((cell, index) => ({ ...cell, index }));
+    it.each(cells)(
+      "writer cell $name:$operation via PostgresSystemIdentityAdapter.execute $mode",
+      async (cell) => {
+        const schema = `m02_system_cell_${String(cell.index)}`;
+        await createSchema(schema);
+        const fixture = await seedM02SystemIdentityGraph(pool, schema, cell.mode);
+        if (cell.name === "resource_version_observations" && cell.operation === "UPDATE") {
+          const seedClient = await pool.connect();
+          try {
+            await seedClient.query("BEGIN");
+            await seedClient.query("SET LOCAL session_replication_role = 'replica'");
+            await seedClient.query(
+              `INSERT INTO ${schema}.resource_version_identities
+                 (id,resource_identity_id,content_fingerprint,canonical_payload,
+                  first_observed_source_snapshot_id,first_observed_candidate_root_id,
+                  first_observed_source_revision,observation_label,status,created_at,
+                  record_version,origin_type,command_id,result_id,audit_event_id)
+               VALUES ($1,$2,$3,convert_to('{"content":"prior"}','UTF8'),$4,$5,
+                 '0123456789abcdef0123456789abcdef01234567',
+                 'snapshot:0123456789ac','IDENTITY_RESOLVED',now(),1,
+                 'HUMAN_COMMAND','command-seed','result-seed','audit-command-seed')`,
+              [
+                fixture.priorResourceVersionId,
+                fixture.resourceIdentityId,
+                HASH_B,
+                fixture.snapshotId,
+                fixture.rootId,
+              ],
+            );
+            await seedClient.query(
+              `INSERT INTO ${schema}.resource_source_links
+                 (id,source_repository_id,normalized_root_path,target_resource_version_id,
+                  relationship,evidence_ids,decision_id,reason,actor_id,created_at,state,
+                  record_version,origin_type,command_id,result_id,audit_event_id)
+               VALUES ($1,$2,'.',$3,'PRIMARY',jsonb_build_array($4::text),
+                 'decision-seed','Prior fixture observation','fixture-editor',now(),
+                 'SUPERSEDED',1,'HUMAN_COMMAND','command-seed','result-seed',
+                 'audit-command-seed')`,
+              [
+                "00000000-0000-7000-8000-000000004028",
+                fixture.sourceRepositoryId,
+                fixture.priorResourceVersionId,
+                fixture.evidenceId,
+              ],
+            );
+            await seedClient.query(
+              `INSERT INTO ${schema}.resource_version_observations
+                 (id,resource_version_identity_id,source_snapshot_id,candidate_root_id,
+                  resource_source_link_id,source_repository_id,provider,provider_repository_id,
+                  normalized_root_path,immutable_revision,observed_at,
+                  origin_type,command_id,result_id,audit_event_id)
+               VALUES ($1,$2,$3,$4,$5,$6,'github','system-repo','.',
+                 '0123456789abcdef0123456789abcdef01234567',now(),
+                 'HUMAN_COMMAND','command-seed','result-seed','audit-command-seed')`,
+              [
+                "00000000-0000-7000-8000-000000004027",
+                fixture.priorResourceVersionId,
+                fixture.snapshotId,
+                fixture.rootId,
+                "00000000-0000-7000-8000-000000004028",
+                fixture.sourceRepositoryId,
+              ],
+            );
+            await seedClient.query("COMMIT");
+          } catch (error) {
+            await seedClient.query("ROLLBACK").catch(() => undefined);
+            throw error;
+          } finally {
+            seedClient.release();
+          }
+        }
+        if (cell.name === "identity_decision_conflict_targets" && cell.operation === "INSERT")
+          await seedP1P2Contradiction(schema, fixture);
+        const request = projectorRequest(cell.mode, fixture);
+        const writerPool = harness.poolForRole("ai_ark_m01_m02_login");
+        const normal = new PostgresSystemIdentityAdapter(writerPool, {
+          schema,
+          peerLoginRole: "ai_ark_m04_login",
+        });
+        const before = await pool.query<{ count: string }>(
+          `SELECT count(*)::text count FROM ${schema}.m02_system_identity_operations`,
+        );
+        const rowLockCell = cell.operation === "UPDATE" && rowLockModes[cell.name] !== undefined;
+        const outcomeSnapshot = async () =>
+          Promise.all(
+            protectedOutcomeTables.map(async (table) => {
+              const result = await pool.query<{ rows: unknown }>(
+                `SELECT jsonb_agg(to_jsonb(t) ORDER BY id) rows FROM ${schema}.${table} t`,
+              );
+              return [table, result.rows[0]?.rows] as const;
+            }),
+          );
+        const beforeOutcome = rowLockCell ? await outcomeSnapshot() : undefined;
+        await pool.query(
+          `REVOKE ${cell.operation} ON ${cell.kind} ${schema}.${cell.name} FROM ai_ark_m01_m02_writer`,
+        );
+        try {
+          const deniedCodes: string[] = [];
+          const deniedMessages: string[] = [];
+          const deniedStatements: { sql: string; code: string; rowId?: string }[] = [];
+          const faultPool = rollbackAndCaptureSystemPool(
+            writerPool,
+            deniedCodes,
+            deniedMessages,
+            deniedStatements,
+          );
+          const fault = new PostgresSystemIdentityAdapter(faultPool, { schema });
+          (fault as unknown as { checkout(): Promise<PoolClient> }).checkout = () =>
+            faultPool.connect();
+          await expect(fault.execute(request)).rejects.toThrow();
+          const indirectPlanFunctions = new Set([
+            "m02_system_mutation_plan_body_matches(text,jsonb)",
+            "m02_system_plan_before_values_match(text,text,text,jsonb)",
+            "m02_system_plan_row_values_match(text,text,jsonb)",
+            "m02_system_plan_values_shape_valid(text,text,jsonb)",
+          ]);
+          expect(
+            deniedCodes.includes("42501") ||
+              (indirectPlanFunctions.has(cell.name) &&
+                deniedCodes.includes("P0001") &&
+                deniedMessages.some((message) =>
+                  message.includes("M02_SYSTEM_RESULT_POSTCONDITION_MISMATCH"),
+                )),
+            `${cell.name}:${cell.operation}:sql-necessity:${deniedCodes.join(",")}`,
+          ).toBe(true);
+          if (rowLockCell) {
+            const deniedLock = deniedStatements.find(
+              (statement) =>
+                statement.sql === `SELECT id FROM ${cell.name} WHERE id=$1 FOR UPDATE` &&
+                statement.code === "42501",
+            );
+            expect(deniedLock, `${cell.name}:UPDATE:locking-read-reached-with-42501`).toBeDefined();
+            expect(deniedLock?.rowId, `${cell.name}:UPDATE:frozen-row-id`).toBeTruthy();
+            const frozenRow = await pool.query<{ id: string }>(
+              `SELECT id FROM ${schema}.${cell.name} WHERE id=$1`,
+              [deniedLock?.rowId],
+            );
+            expect(frozenRow.rows, `${cell.name}:UPDATE:frozen-row-exists`).toHaveLength(1);
+            expect(
+              await outcomeSnapshot(),
+              `${cell.name}:UPDATE:zero-committed-side-effects`,
+            ).toEqual(beforeOutcome);
+          }
+          const after = await pool.query<{ count: string }>(
+            `SELECT count(*)::text count FROM ${schema}.m02_system_identity_operations`,
+          );
+          expect(after.rows[0]?.count, `${cell.name}:${cell.operation}:zero-side-effect`).toBe(
+            before.rows[0]?.count,
+          );
+        } finally {
+          await pool.query(
+            `GRANT ${cell.operation} ON ${cell.kind} ${schema}.${cell.name} TO ai_ark_m01_m02_writer`,
+          );
+        }
+        await expect(normal.execute(request)).resolves.toMatchObject({ replayed: false });
+      },
+      120_000,
+    );
+  });
+
+  it.each(
+    [
+      { object: "m02_rejected_system_identity_audits", operation: "SELECT", kind: "TABLE" },
+      { object: "m02_rejected_system_identity_audits", operation: "INSERT", kind: "TABLE" },
+      {
+        object: "m02_system_rejection_targets_valid(jsonb)",
+        operation: "EXECUTE",
+        kind: "FUNCTION",
+      },
+    ].map((cell, index) => ({ ...cell, index })),
+  )(
+    "requires writer $object:$operation via PostgresSystemIdentityAdapter.persistRejection",
+    async (cell) => {
+      const schema = `m02_system_rejection_cell_${String(cell.index)}`;
+      await createSchema(schema);
+      const fixture = await seedM02SystemIdentityGraph(pool, schema, "S6_JR");
+      await pool.query(
+        `UPDATE ${schema}.acquisition_jobs
+         SET cancellation_requested=true,record_version=record_version+1 WHERE id=$1`,
+        [fixture.jobId],
+      );
+      const request = projectorRequest("S6_JR", fixture);
+      const writerPool = harness.poolForRole("ai_ark_m01_m02_login");
+      await pool.query(
+        `REVOKE ${cell.operation} ON ${cell.kind} ${schema}.${cell.object} FROM ai_ark_m01_m02_writer`,
+      );
+      try {
+        const deniedCodes: string[] = [];
+        const deniedMessages: string[] = [];
+        const faultPool = rollbackAndCaptureSystemPool(writerPool, deniedCodes, deniedMessages);
+        const fault = new PostgresSystemIdentityAdapter(faultPool, { schema });
+        (fault as unknown as { checkout(): Promise<PoolClient> }).checkout = () =>
+          faultPool.connect();
+        await expect(fault.execute(request)).rejects.toThrow();
+        expect(deniedCodes, `${cell.object}:${cell.operation}:sql-necessity`).toContain("42501");
+        const absent = await pool.query<{ count: string }>(
+          `SELECT count(*)::text count FROM ${schema}.m02_rejected_system_identity_audits`,
+        );
+        expect(absent.rows[0]?.count).toBe("0");
+      } finally {
+        await pool.query(
+          `GRANT ${cell.operation} ON ${cell.kind} ${schema}.${cell.object} TO ai_ark_m01_m02_writer`,
+        );
+      }
+      await expect(
+        new PostgresSystemIdentityAdapter(writerPool, {
+          schema,
+          peerLoginRole: "ai_ark_m04_login",
+        }).execute(request),
+      ).rejects.toMatchObject({ code: "CANCELLED", phase: "PRE_PROJECTOR" });
+      const acceptedAudit = await pool.query<{ count: string }>(
+        `SELECT count(*)::text count FROM ${schema}.m02_rejected_system_identity_audits`,
+      );
+      expect(acceptedAudit.rows[0]?.count).toBe("1");
+    },
+    120_000,
+  );
 
   it("freezes canonical six-tier input and a pre-projector replay locator", () => {
     const canonical = canonicalizeIdentityDecisionInput(decisionInput());
@@ -397,9 +844,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     const schema = "m02_system_signal_semantics";
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S4_R0_JC");
-    await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S4_R0_JC", fixture),
-    );
+    await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    }).execute(projectorRequest("S4_R0_JC", fixture));
     await pool.query(
       `ALTER TABLE ${schema}.identity_decision_signals
        DISABLE TRIGGER identity_decision_children_immutable`,
@@ -445,9 +893,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       `UPDATE ${schema}.repository_classification_runs SET analysis_run_id=$1 WHERE id=$2`,
       [linkedAnalysisRunId, fixture.runId],
     );
-    await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S6_JR", fixture),
-    );
+    await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    }).execute(projectorRequest("S6_JR", fixture));
     const direct = await pool.query<{
       analysis_run_id: string;
       decision_source: string;
@@ -487,9 +936,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     } finally {
       await pool.query(`SET session_replication_role = 'origin'`);
     }
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S4_R0_JC", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S4_R0_JC", fixture));
     expect(result.automaticProjectorModeId).toBe("S7_JR");
   }, 60_000);
 
@@ -545,9 +995,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       [externalPayload.toString("utf8"), fixture.jobId],
     );
 
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S3_JC", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S3_JC", fixture));
     expect(result.automaticProjectorModeId).toBe("S6_JR");
     const direct = await pool.query<{
       conflict_code: string;
@@ -595,9 +1046,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     } finally {
       await pool.query(`SET session_replication_role = 'origin'`);
     }
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S4_R0_JC", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S4_R0_JC", fixture));
     expect(result.automaticProjectorModeId).toBe("S4_R0_JC");
     const evidence = await pool.query<{ evidence_reference_id: string }>(
       `SELECT child.evidence_reference_id
@@ -637,9 +1089,10 @@ describe("M02 PostgreSQL system identity projector", () => {
         fixture.jobId,
       ],
     );
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S5_R0_JC", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S5_R0_JC", fixture));
     expect(result.automaticProjectorModeId).toBe("S7_JR");
     const rows = await pool.query<{
       outcome: string;
@@ -697,9 +1150,10 @@ describe("M02 PostgreSQL system identity projector", () => {
          WHERE job_id=$3`,
         [JSON.stringify(reliableIdentityTokenOrNull), fixture.evidenceId, fixture.jobId],
       );
-      const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-        projectorRequest("S1_R0_JC", fixture),
-      );
+      const result = await new PostgresSystemIdentityAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        { schema, peerLoginRole: "ai_ark_m04_login" },
+      ).execute(projectorRequest("S1_R0_JC", fixture));
       expect(result.automaticProjectorModeId).toBe(expectedMode);
       const signal = await pool.query<{
         signal_type: string;
@@ -749,9 +1203,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     } finally {
       await pool.query(`SET session_replication_role = 'origin'`);
     }
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S2_JC", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S2_JC", fixture));
     expect(result.automaticProjectorModeId).toBe("S6_JR");
     const conflict = await pool.query<{ conflict_code: string }>(
       `SELECT conflict_code FROM ${schema}.identity_decision_conflicts`,
@@ -800,9 +1255,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       }
 
       await expect(
-        new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-          projectorRequest("S3_JC", fixture),
-        ),
+        new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+          schema,
+          peerLoginRole: "ai_ark_m04_login",
+        }).execute(projectorRequest("S3_JC", fixture)),
       ).rejects.toMatchObject({
         code: "EXPECTED_VERSION_SET_INVALID",
         phase: "POST_PROJECTOR_PRE_ALLOCATION",
@@ -910,9 +1366,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     } finally {
       await pool.query(`SET session_replication_role = 'origin'`);
     }
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S1_R0_JC", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S1_R0_JC", fixture));
     expect(result.automaticProjectorModeId).toBe("S6_JR");
     const conflict = await pool.query<{
       conflict_code: string;
@@ -966,9 +1423,10 @@ describe("M02 PostgreSQL system identity projector", () => {
        WHERE job_id=$1`,
       [createFixture.jobId],
     );
-    await new PostgresSystemIdentityAdapter(pool, { schema: createSchemaName }).execute(
-      projectorRequest("S1_R0_JC", createFixture),
-    );
+    await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema: createSchemaName,
+      peerLoginRole: "ai_ark_m04_login",
+    }).execute(projectorRequest("S1_R0_JC", createFixture));
     const createdUrl = await pool.query<{ canonical_url: string }>(
       `SELECT canonical_url FROM ${createSchemaName}.source_repository_urls
        WHERE source_repository_id IN (
@@ -1007,9 +1465,13 @@ describe("M02 PostgreSQL system identity projector", () => {
     } finally {
       await pool.query(`SET session_replication_role = 'origin'`);
     }
-    const mismatch = await new PostgresSystemIdentityAdapter(pool, {
-      schema: mismatchSchema,
-    }).execute(projectorRequest("S3_JC", mismatchFixture));
+    const mismatch = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      {
+        schema: mismatchSchema,
+        peerLoginRole: "ai_ark_m04_login",
+      },
+    ).execute(projectorRequest("S3_JC", mismatchFixture));
     expect(mismatch.automaticProjectorModeId).toBe("S6_JR");
     const mismatchConflict = await pool.query<{ conflict_code: string }>(
       `SELECT conflict_code FROM ${mismatchSchema}.identity_decision_conflicts`,
@@ -1023,9 +1485,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       const schema = `m02_system_${mode.toLowerCase()}`;
       await createSchema(schema);
       const fixture = await seedM02SystemIdentityGraph(pool, schema, mode);
-      const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-        projectorRequest(mode, fixture),
-      );
+      const result = await new PostgresSystemIdentityAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        { schema, peerLoginRole: "ai_ark_m04_login" },
+      ).execute(projectorRequest(mode, fixture));
       expect(result.automaticProjectorModeId).toBe(mode);
       expect(result.replayed).toBe(false);
       expect(result.createdIdentityDecisionTierEvaluationIds).toHaveLength(6);
@@ -1170,9 +1633,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     const schema = "m02_system_s7_proposal_guards";
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S7_JR");
-    await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S7_JR", fixture),
-    );
+    await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    }).execute(projectorRequest("S7_JR", fixture));
     const proposalSet = canonicalGuard("DUPLICATE_PROPOSAL_SET", {
       candidateId: fixture.candidateId,
     });
@@ -1286,9 +1750,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       jobLineageId: "lineage-system",
       operationScope: "IDENTITY_RESOLUTION",
     });
-    await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S3_JC", fixture),
-    );
+    await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    }).execute(projectorRequest("S3_JC", fixture));
     const operation = await pool.query<{ system_expected_versions: Record<string, number | null> }>(
       `SELECT system_expected_versions FROM ${schema}.m02_system_identity_operations`,
     );
@@ -1327,12 +1792,22 @@ describe("M02 PostgreSQL system identity projector", () => {
       const schema = `m02_system_${mode.toLowerCase()}`;
       await createSchema(schema);
       const initialFixture = await seedM02SystemIdentityGraph(pool, schema, "S1_R0_JC");
-      const initial = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-        projectorRequest("S1_R0_JC", initialFixture),
+      const initial = await new PostgresSystemIdentityAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        { schema, peerLoginRole: "ai_ark_m04_login" },
+      ).execute(projectorRequest("S1_R0_JC", initialFixture));
+      const fixture = await seedM02SystemReanalysisGraph(
+        pool,
+        schema,
+        initialFixture,
+        mode,
+        harness.poolForRole("ai_ark_m01_m02_login"),
       );
-      const fixture = await seedM02SystemReanalysisGraph(pool, schema, initialFixture, mode);
       const request = projectorRequest(mode, fixture);
-      const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(request);
+      const result = await new PostgresSystemIdentityAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        { schema, peerLoginRole: "ai_ark_m04_login" },
+      ).execute(request);
       expect(result.automaticProjectorModeId).toBe(mode);
       expect(result.resourceIdentityIdOrNull).toBe(initial.resourceIdentityIdOrNull);
       expect(result.resourceVersionIdentityIdOrNull).toBe(initial.resourceVersionIdentityIdOrNull);
@@ -1477,10 +1952,17 @@ describe("M02 PostgreSQL system identity projector", () => {
     const schema = "m02_system_replacement_provenance";
     await createSchema(schema);
     const initialFixture = await seedM02SystemIdentityGraph(pool, schema, "S1_R0_JC");
-    await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S1_R0_JC", initialFixture),
+    await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    }).execute(projectorRequest("S1_R0_JC", initialFixture));
+    const fixture = await seedM02SystemReanalysisGraph(
+      pool,
+      schema,
+      initialFixture,
+      "S9_JC",
+      harness.poolForRole("ai_ark_m01_m02_login"),
     );
-    const fixture = await seedM02SystemReanalysisGraph(pool, schema, initialFixture, "S9_JC");
     await pool.query(`SET session_replication_role = 'replica'`);
     try {
       await pool.query(
@@ -1496,9 +1978,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       await pool.query(`SET session_replication_role = 'origin'`);
     }
     await expect(
-      new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-        projectorRequest("S9_JC", fixture),
-      ),
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute(projectorRequest("S9_JC", fixture)),
     ).rejects.toMatchObject({
       code: "MUTATION_PLAN_CHANGED",
       phase: "POST_PROJECTOR_PRE_ALLOCATION",
@@ -1514,9 +1997,10 @@ describe("M02 PostgreSQL system identity projector", () => {
       ...initialFixture,
       candidateId: initialFixture.siblingCandidateId,
     };
-    const siblingResult = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S5_R1_JR", siblingFixture),
-    );
+    const siblingResult = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S5_R1_JR", siblingFixture));
     expect(siblingResult.automaticProjectorModeId.endsWith("_JR")).toBe(true);
 
     const replacementFixture = await seedM02SystemReanalysisGraph(
@@ -1524,6 +2008,7 @@ describe("M02 PostgreSQL system identity projector", () => {
       schema,
       initialFixture,
       "S9_JC",
+      harness.poolForRole("ai_ark_m01_m02_login"),
       "RETRY_EXHAUSTED",
     );
     await pool.query(
@@ -1531,9 +2016,10 @@ describe("M02 PostgreSQL system identity projector", () => {
        SET review_state='NOT_REQUIRED',record_version=record_version+1 WHERE id=$1`,
       [replacementFixture.jobId],
     );
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S3_JR", replacementFixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S3_JR", replacementFixture));
     expect(result.automaticProjectorModeId).toBe("S3_JR");
     const siblingChain = await pool.query<{
       candidate_status: string;
@@ -1618,9 +2104,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     } finally {
       await pool.query(`SET session_replication_role = 'origin'`);
     }
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S1_R0_JR", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S1_R0_JR", fixture));
     expect(result.automaticProjectorModeId).toBe("S1_R0_JC");
   }, 60_000);
 
@@ -1628,7 +2115,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     const schema = "m02_system_s6";
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S6_JR");
-    const adapter = new PostgresSystemIdentityAdapter(pool, { schema });
+    const adapter = new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    });
     const result = await adapter.execute(projectorRequest("S6_JR", fixture));
     expect(result.automaticProjectorModeId).toBe("S6_JR");
     expect(result.replayed).toBe(false);
@@ -1665,7 +2155,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S6_JR");
     const request = projectorRequest("S6_JR", fixture);
-    const adapter = new PostgresSystemIdentityAdapter(pool, { schema });
+    const adapter = new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    });
     const first = await adapter.execute(request);
     const replay = await adapter.execute(request);
     expect(replay).toMatchObject({
@@ -1706,15 +2199,19 @@ describe("M02 PostgreSQL system identity projector", () => {
     const release = new Promise<void>((resolve) => {
       releaseFrozen = resolve;
     });
-    const delayed = new PostgresSystemIdentityAdapter(pool, {
+    const delayed = new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
       schema,
       onFrozen: async () => {
         observedFrozen();
         await release;
       },
+      peerLoginRole: "ai_ark_m04_login",
     }).execute(request);
     await frozen;
-    const winner = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(request);
+    const winner = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(request);
     releaseFrozen();
     const replay = await delayed;
     expect(winner.replayed).toBe(false);
@@ -1727,8 +2224,14 @@ describe("M02 PostgreSQL system identity projector", () => {
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S6_JR");
     const request = projectorRequest("S6_JR", fixture);
     const [left, right] = await Promise.all([
-      new PostgresSystemIdentityAdapter(pool, { schema }).execute(request),
-      new PostgresSystemIdentityAdapter(pool, { schema }).execute(request),
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute(request),
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute(request),
     ]);
     expect(left.id).toBe(right.id);
     expect([left.replayed, right.replayed].sort()).toEqual([false, true]);
@@ -1744,7 +2247,7 @@ describe("M02 PostgreSQL system identity projector", () => {
     const rollbackFixture = await seedM02SystemIdentityGraph(pool, rollbackSchema, "S6_JR");
     const rollbackRequest = projectorRequest("S6_JR", rollbackFixture);
     await expect(
-      new PostgresSystemIdentityAdapter(pool, {
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema: rollbackSchema,
         onTransactionAttempt: async (_attempt, client) => {
           await client.query(
@@ -1753,6 +2256,7 @@ describe("M02 PostgreSQL system identity projector", () => {
           );
           throw new Error("FAULT_INJECTED");
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(rollbackRequest),
     ).rejects.toThrow("FAULT_INJECTED");
     const rolledBack = await pool.query<{ operations: string; version: string }>(
@@ -1766,13 +2270,17 @@ describe("M02 PostgreSQL system identity projector", () => {
     const retrySchema = "m02_system_retry";
     await createSchema(retrySchema);
     const retryFixture = await seedM02SystemIdentityGraph(pool, retrySchema, "S6_JR");
-    const result = await new PostgresSystemIdentityAdapter(pool, {
-      schema: retrySchema,
-      onTransactionAttempt: (attempt) => {
-        if (attempt < 3)
-          throw Object.assign(new Error("SERIALIZATION_INJECTED"), { code: "40001" });
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      {
+        schema: retrySchema,
+        onTransactionAttempt: (attempt) => {
+          if (attempt < 3)
+            throw Object.assign(new Error("SERIALIZATION_INJECTED"), { code: "40001" });
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    }).execute(projectorRequest("S6_JR", retryFixture));
+    ).execute(projectorRequest("S6_JR", retryFixture));
     expect(result).toMatchObject({ replayed: false, attemptCount: 3 });
     const retried = await pool.query<{ operations: string; results: string; audits: string }>(
       `SELECT
@@ -1817,28 +2325,27 @@ describe("M02 PostgreSQL system identity projector", () => {
         repositoryRef: { provider: "github", providerRepositoryId: "system-repo" },
       });
       await expect(
-        new PostgresSystemIdentityAdapter(pool, {
+        new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
           schema,
-          onTransactionAttempt: async (attempt) => {
+          onTransactionAttempt: (attempt) => {
             transactionAttempts += 1;
-            if (attempt !== 1) return;
-            const competitor = await pool.connect();
-            try {
-              await competitor.query(`SET search_path TO ${schema}, public`);
-              if (change === "positive version")
-                await competitor.query(
-                  "UPDATE acquisition_jobs SET record_version=record_version+1 WHERE id=$1",
-                  [fixture.jobId],
-                );
-              else
-                await competitor.query("DELETE FROM m02_concurrency_guards WHERE guard_key=$1", [
-                  repositoryGuard.key,
-                ]);
-            } finally {
-              competitor.release();
-            }
-            throw Object.assign(new Error("SERIALIZATION_INJECTED"), { code: "40001" });
+            if (attempt === 1)
+              throw Object.assign(new Error("SERIALIZATION_INJECTED"), { code: "40001" });
           },
+          onTransactionRollback: async (attempt) => {
+            if (attempt !== 1) return;
+            if (change === "positive version")
+              await pool.query(
+                `UPDATE ${schema}.acquisition_jobs
+                 SET record_version=record_version+1 WHERE id=$1`,
+                [fixture.jobId],
+              );
+            else
+              await pool.query(`DELETE FROM ${schema}.m02_concurrency_guards WHERE guard_key=$1`, [
+                repositoryGuard.key,
+              ]);
+          },
+          peerLoginRole: "ai_ark_m04_login",
         }).execute(projectorRequest("S6_JR", fixture)),
       ).rejects.toMatchObject({
         code: expectedCode,
@@ -1898,6 +2405,7 @@ describe("M02 PostgreSQL system identity projector", () => {
         readonly onPlanFrozen: (value: PlanFreezeProbe) => void;
       } = {
         schema,
+        peerLoginRole: "ai_ark_m04_login",
         idAllocator: () => {
           const id = `00000000-0000-700${String(sequence)}-8000-${String(nextId).padStart(12, "0")}`;
           nextId += 1;
@@ -1916,9 +2424,10 @@ describe("M02 PostgreSQL system identity projector", () => {
           events.push("transaction");
         },
       };
-      await new PostgresSystemIdentityAdapter(pool, options).execute(
-        projectorRequest("S6_JR", fixture),
-      );
+      await new PostgresSystemIdentityAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        options,
+      ).execute(projectorRequest("S6_JR", fixture));
       const persisted = await pool.query<{
         mutation_plan_fingerprint: string;
         mutation_plan_payload: Buffer;
@@ -1977,9 +2486,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     const schema = "m02_system_complete_typed_plan";
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S2_JC");
-    const result = await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S2_JC", fixture),
-    );
+    const result = await new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    ).execute(projectorRequest("S2_JC", fixture));
     const retained = await pool.query<{
       mutation_plan_payload: Buffer;
       audit_ids: string[];
@@ -2159,7 +2669,7 @@ describe("M02 PostgreSQL system identity projector", () => {
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S6_JR");
     await expect(
-      new PostgresSystemIdentityAdapter(pool, {
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema,
         onTransactionAttempt: async (_attempt, client) => {
           await client.query(
@@ -2167,6 +2677,7 @@ describe("M02 PostgreSQL system identity projector", () => {
             [fixture.candidateId],
           );
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(projectorRequest("S6_JR", fixture)),
     ).rejects.toMatchObject({ code: "MUTATION_PLAN_CHANGED", phase: "TRANSACTION_ATTEMPT" });
     const direct = await pool.query<{
@@ -2192,9 +2703,10 @@ describe("M02 PostgreSQL system identity projector", () => {
     const schema = "m02_system_origin_guard";
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S6_JR");
-    await new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-      projectorRequest("S6_JR", fixture),
-    );
+    await new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    }).execute(projectorRequest("S6_JR", fixture));
     const shared = canonicalGuard("JOB_SCOPE_CONTROLLER", {
       jobLineageId: "lineage-system",
       operationScope: "IDENTITY_RESOLUTION",
@@ -2231,13 +2743,17 @@ describe("M02 PostgreSQL system identity projector", () => {
     const release = new Promise<void>((resolve) => {
       releaseFrozen = resolve;
     });
-    const systemAttempt = new PostgresSystemIdentityAdapter(pool, {
-      schema,
-      onFrozen: async () => {
-        observeFrozen();
-        await release;
+    const systemAttempt = new PostgresSystemIdentityAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      {
+        schema,
+        onFrozen: async () => {
+          observeFrozen();
+          await release;
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    }).execute(projectorRequest("S1_R1_JC", fixture));
+    ).execute(projectorRequest("S1_R1_JC", fixture));
     await frozen;
     const group = await pool.query<{ group_id: string }>(
       `SELECT root.group_id FROM ${schema}.candidate_roots root WHERE root.id=$1`,
@@ -2278,7 +2794,10 @@ describe("M02 PostgreSQL system identity projector", () => {
         sourceSnapshotId: fixture.snapshotId,
       },
     };
-    const humanAdapter = new PostgresManualResolutionAdapter(pool, { schema });
+    const humanAdapter = new PostgresManualResolutionAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    );
     const humanRequest: ManualResolutionEnvelope = {
       ...provisional,
       expectedVersions: {
@@ -2312,7 +2831,7 @@ describe("M02 PostgreSQL system identity projector", () => {
     const siblingReviewId = siblingReview.rows[0]?.id;
     if (siblingReviewId === undefined) throw new Error("SIBLING_REVIEW_FIXTURE_MISSING");
     await expect(
-      new PostgresSystemIdentityAdapter(pool, {
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema,
         onFrozen: async () => {
           await pool.query(
@@ -2321,6 +2840,7 @@ describe("M02 PostgreSQL system identity projector", () => {
             [siblingReviewId],
           );
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(projectorRequest("S1_R0_JR", fixture)),
     ).rejects.toMatchObject({
       code: "STALE_RECORD_VERSION",
@@ -2340,31 +2860,44 @@ describe("M02 PostgreSQL system identity projector", () => {
     await createSchema(schema);
     const fixture = await seedM02SystemIdentityGraph(pool, schema, "S1_R0_JC");
     await expect(
-      new PostgresSystemIdentityAdapter(pool, {
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema,
         onTransactionAttempt: async (_attempt, client) => {
-          await client.query("SET LOCAL session_replication_role = 'replica'");
           await client.query(
-            `UPDATE acquisition_results
-             SET result=jsonb_set(result,'{identityDiscovery,reliableIdentityTokenOrNull}','null')
-             WHERE job_id=$1`,
+            `UPDATE m02_jobs SET analysis_policy_version='analysis-under-lock-drift',
+              record_version=record_version+1
+             WHERE id=$1`,
             [fixture.jobId],
           );
-          await client.query("SET LOCAL session_replication_role = 'origin'");
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(projectorRequest("S1_R0_JC", fixture)),
     ).rejects.toMatchObject({
       code: "MUTATION_PLAN_CHANGED",
       phase: "TRANSACTION_ATTEMPT",
     });
-    const durable = await pool.query<{ token: string; operations: string; rejections: string }>(
+    const durable = await pool.query<{
+      token: string;
+      analysis_policy_version: string;
+      record_version: string;
+      operations: string;
+      rejections: string;
+    }>(
       `SELECT result #>> '{identityDiscovery,reliableIdentityTokenOrNull}' AS token,
+        (SELECT analysis_policy_version FROM ${schema}.m02_jobs WHERE id=$1) AS analysis_policy_version,
+        (SELECT record_version FROM ${schema}.m02_jobs WHERE id=$1) AS record_version,
         (SELECT count(*) FROM ${schema}.m02_system_identity_operations)::text AS operations,
         (SELECT count(*) FROM ${schema}.m02_rejected_system_identity_audits)::text AS rejections
        FROM ${schema}.acquisition_results WHERE job_id=$1`,
       [fixture.jobId],
     );
-    expect(durable.rows[0]).toEqual({ token: "system-skill", operations: "0", rejections: "1" });
+    expect(durable.rows[0]).toEqual({
+      token: "system-skill",
+      analysis_policy_version: "analysis-v1",
+      record_version: "1",
+      operations: "0",
+      rejections: "1",
+    });
   }, 60_000);
 
   it("classifies real two-session 23505 collisions by the conflicting canonical guard bytes", async () => {
@@ -2394,12 +2927,16 @@ describe("M02 PostgreSQL system identity projector", () => {
           collidingGuard.payloadHash,
         ],
       );
-      const contender = new PostgresSystemIdentityAdapter(pool, {
-        schema: retrySchema,
-        onTransactionAttempt: (attempt) => {
-          if (attempt === 1) notifyAttempt();
+      const contender = new PostgresSystemIdentityAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        {
+          schema: retrySchema,
+          onTransactionAttempt: (attempt) => {
+            if (attempt === 1) notifyAttempt();
+          },
+          peerLoginRole: "ai_ark_m04_login",
         },
-      }).execute(projectorRequest("S6_JR", retryFixture));
+      ).execute(projectorRequest("S6_JR", retryFixture));
       await attemptStarted;
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
       await competitor.query("COMMIT");
@@ -2428,7 +2965,7 @@ describe("M02 PostgreSQL system identity projector", () => {
       ],
     );
     await expect(
-      new PostgresSystemIdentityAdapter(pool, {
+      new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema: collisionSchema,
         onTransactionAttempt: async (_attempt, client) => {
           await client.query(
@@ -2443,6 +2980,7 @@ describe("M02 PostgreSQL system identity projector", () => {
             ],
           );
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(projectorRequest("S6_JR", collisionFixture)),
     ).rejects.toMatchObject({ code: "MUTATION_PLAN_CHANGED", phase: "TRANSACTION_ATTEMPT" });
   }, 60_000);
@@ -2479,9 +3017,10 @@ describe("M02 PostgreSQL system identity projector", () => {
         await pool.query(`SET session_replication_role = 'origin'`);
       }
       await expect(
-        new PostgresSystemIdentityAdapter(pool, { schema }).execute(
-          projectorRequest("S1_R0_JC", fixture),
-        ),
+        new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+          schema,
+          peerLoginRole: "ai_ark_m04_login",
+        }).execute(projectorRequest("S1_R0_JC", fixture)),
       ).rejects.toMatchObject({ code: expectedCode, phase: "PRE_PROJECTOR" });
       const rejection = await pool.query<{
         phase: string;
@@ -2544,9 +3083,11 @@ describe("M02 PostgreSQL system identity projector", () => {
       const fixture = await seedM02SystemIdentityGraph(pool, testCase.schema, "S6_JR");
       const options = await testCase.prepare(fixture);
       await expect(
-        new PostgresSystemIdentityAdapter(pool, { schema: testCase.schema, ...options }).execute(
-          projectorRequest("S6_JR", fixture),
-        ),
+        new PostgresSystemIdentityAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+          schema: testCase.schema,
+          ...options,
+          peerLoginRole: "ai_ark_m04_login",
+        }).execute(projectorRequest("S6_JR", fixture)),
       ).rejects.toMatchObject({ code: testCase.code, phase: testCase.phase });
       const direct = await pool.query<{ phase: string; error_code: string; operations: string }>(
         `SELECT rejection.phase,rejection.error_code,
@@ -2560,5 +3101,5 @@ describe("M02 PostgreSQL system identity projector", () => {
     }
     expect(rejectionReceipts).toHaveLength(cases.length);
     systemExecutedReceipts.record("F42", "lifecycle.rejections", rejectionReceipts);
-  }, 60_000);
+  }, 120_000);
 });

@@ -5,6 +5,7 @@ export * from "./m03.js";
 export * from "./m03-normalization.js";
 export * from "./m03-values.js";
 export * from "./m03-bundle.js";
+export * from "./m04.js";
 export * from "./ports.js";
 export * from "./primitives.js";
 export * from "./result.js";

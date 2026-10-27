@@ -4,5 +4,6 @@ export * from "./fake-analysis-provider.js";
 export * from "./fake-source-provider.js";
 export * from "./fixture-loader.js";
 export * from "./ids.js";
+export * from "./m03-genuine-bundle-fixture.js";
 export * from "./object-storage.js";
 export * from "./postgres-harness.js";

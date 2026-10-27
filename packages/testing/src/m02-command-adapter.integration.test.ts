@@ -21,6 +21,8 @@ import {
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+// @ts-expect-error JavaScript migration module is exercised directly by this integration test.
+import { loadMigrations, renderMigrationSql } from "../../../scripts/db-common.mjs";
 import { EphemeralPostgresHarness } from "./postgres-harness.js";
 import { ExecutedReceiptCollector } from "./m02-executed-receipts.js";
 import { seedM02ProductionGraph } from "./m02-postgres-fixture.js";
@@ -33,6 +35,11 @@ const migration002Url = new URL(
   "../../job-queue/migrations/002_m02_classification_identity.sql",
   import.meta.url,
 );
+const migration003Url = new URL(
+  "../../job-queue/migrations/003_m04_evidence_binding.sql",
+  import.meta.url,
+);
+const migration003 = await readFile(migration003Url, "utf8");
 const typedProjectorUrl = new URL("../../job-queue/src/m02-typed-state.ts", import.meta.url);
 const humanProjectorUrl = new URL("../../job-queue/src/m02-human-projectors.ts", import.meta.url);
 const commandPlanUrl = new URL("../../job-queue/src/m02-human-command-plan.ts", import.meta.url);
@@ -529,6 +536,21 @@ function goldenProjectionCase(mode: HumanProjectionMode): GoldenProjectionCase {
 }
 
 const golden256 = humanProjectionModes().map(goldenProjectionCase);
+const writerManifest = (
+  (await loadMigrations())[2] as
+    | {
+        manifest?: {
+          groups: readonly {
+            role: string;
+            relations: readonly { name: string; operations: readonly string[] }[];
+            functions: readonly string[];
+            sequences: readonly { name: string; operations: readonly string[] }[];
+          }[];
+        };
+      }
+    | undefined
+)?.manifest?.groups.find(({ role }) => role === "M01_M02_WRITER_GROUP");
+if (writerManifest === undefined) throw new Error("M02_WRITER_MANIFEST_GROUP_MISSING");
 
 const canonicalReplacementInputFingerprint = createHash("sha256")
   .update(
@@ -786,9 +808,15 @@ async function createSchema(pool: Pool, schema: string): Promise<void> {
     client.release();
   }
   await seedM02ProductionGraph(pool, schema);
+  await pool.query(`SET search_path TO ${schema}, public`);
+  await pool.query(renderMigrationSql(migration003, schema, (await loadMigrations())[2]?.manifest));
 }
 
-async function migrateSchema(pool: Pool, schema: string): Promise<void> {
+async function migrateSchema(
+  pool: Pool,
+  schema: string,
+  beforeM04?: () => Promise<void>,
+): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public");
@@ -800,6 +828,9 @@ async function migrateSchema(pool: Pool, schema: string): Promise<void> {
     client.release();
   }
   await seedM02ProductionGraph(pool, schema);
+  await beforeM04?.();
+  await pool.query(`SET search_path TO ${schema}, public`);
+  await pool.query(renderMigrationSql(migration003, schema, (await loadMigrations())[2]?.manifest));
 }
 
 async function resetGoldenSchema(pool: Pool, schema: string): Promise<void> {
@@ -810,7 +841,9 @@ async function resetGoldenSchema(pool: Pool, schema: string): Promise<void> {
        ORDER BY convert_to(table_name,'UTF8')`,
       [schema],
     )
-  ).rows.map(({ table_name }) => `"${schema}"."${table_name.replaceAll('"', '""')}"`);
+  ).rows
+    .filter(({ table_name }) => table_name !== "m03_m04_predecessor_fence")
+    .map(({ table_name }) => `"${schema}"."${table_name.replaceAll('"', '""')}"`);
   if (tables.length === 0) throw new Error(`GOLDEN_SCHEMA_EMPTY:${schema}`);
   await pool.query(`TRUNCATE TABLE ${tables.join(",")} RESTART IDENTITY CASCADE`);
   await seedM02ProductionGraph(pool, schema);
@@ -889,6 +922,7 @@ async function persistPreparedCommand(
   schema: string,
   prepared: ReturnType<typeof prepareCommand>,
   fixtureProfile: "DEFAULT" | "ALL_COMMAND" = "DEFAULT",
+  deferDiscovery = false,
 ): Promise<void> {
   prepared.input.expectedVersions = {};
   if (
@@ -939,9 +973,11 @@ async function persistPreparedCommand(
        SET session_replication_role = 'origin'`,
     );
   if (prepared.input.command === "MARK_MIRROR") {
-    await pool.query(`DELETE FROM ${schema}.source_repository_identities WHERE id='source-main'`);
     await pool.query(
-      `UPDATE ${schema}.source_snapshots SET provider_repository_id='repo-mirror' WHERE id='snapshot-1'`,
+      `SET session_replication_role = 'replica';
+       DELETE FROM ${schema}.source_repository_identities WHERE id='source-main';
+       UPDATE ${schema}.source_snapshots SET provider_repository_id='repo-mirror' WHERE id='snapshot-1';
+       SET session_replication_role = 'origin'`,
     );
   }
   if (["SPLIT_ROOTS", "MERGE_ROOTS"].includes(prepared.input.command)) {
@@ -1318,11 +1354,13 @@ async function persistPreparedCommand(
       );
     }
   }
-  prepared.input.expectedVersions = {
-    ...(await new PostgresManualResolutionAdapter(pool, {
-      schema,
-    }).discoverRequiredCurrentExpectations(prepared.input)),
-  };
+  if (!deferDiscovery)
+    prepared.input.expectedVersions = {
+      ...(await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).discoverRequiredCurrentExpectations(prepared.input)),
+    };
 }
 
 async function domainRecord(pool: Pool, schema: string, key: string) {
@@ -1373,6 +1411,43 @@ function transactionBoundPool(client: PoolClient): Pool {
     query,
   } as unknown as Pool;
 }
+
+/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/unbound-method */
+function rollbackAndCaptureWriterPool(base: Pool, deniedCodes: string[]): Pool {
+  return {
+    connect: async () => {
+      const client = await base.connect();
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === "query")
+            return async (...args: unknown[]) => {
+              const query = args[0];
+              const sql =
+                typeof query === "string"
+                  ? query
+                  : typeof query === "object" && query !== null && "text" in query
+                    ? query.text
+                    : undefined;
+              try {
+                if (typeof sql === "string" && sql.trim() === "COMMIT") {
+                  await target.query("SET CONSTRAINTS ALL IMMEDIATE");
+                  throw new Error("M02_TEST_FORCED_ROLLBACK");
+                }
+                return await Reflect.apply(target.query, target, args);
+              } catch (error) {
+                const code = (error as { code?: unknown }).code;
+                if (typeof code === "string") deniedCodes.push(code);
+                throw error;
+              }
+            };
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+  } as unknown as Pool;
+}
+/* eslint-enable @typescript-eslint/no-unsafe-return, @typescript-eslint/unbound-method */
 
 function directGoldenMode(mode: HumanProjectionMode): HumanProjectionMode {
   if (mode.family !== "RESOLVE_AMBIGUITY") return mode;
@@ -1928,14 +2003,16 @@ async function prepareGoldenExecution(
   const configuredBeforeDiscovery =
     direct.dimensions.P === "P1" || direct.dimensions.mode === "FIRST";
   if (configuredBeforeDiscovery && family === "MARK_MIRROR") {
-    await pool.query(`DELETE FROM ${schema}.source_repository_identities WHERE id='source-main'`);
     await pool.query(
-      `UPDATE ${schema}.source_snapshots
-       SET provider_repository_id='repo-mirror' WHERE id='snapshot-1'`,
+      `SET session_replication_role = 'replica';
+       DELETE FROM ${schema}.source_repository_identities WHERE id='source-main';
+       UPDATE ${schema}.source_snapshots
+       SET provider_repository_id='repo-mirror' WHERE id='snapshot-1';
+       SET session_replication_role = 'origin'`,
     );
   }
   if (configuredBeforeDiscovery) await configureGoldenDimensions(client, direct, prepared.input);
-  await persistPreparedCommand(pool, schema, prepared);
+  await persistPreparedCommand(pool, schema, prepared, "DEFAULT", true);
   if (family === "REQUEST_CLARIFICATION" && direct.dimensions.target === "REJECTION") {
     await client.query("SET LOCAL session_replication_role = 'replica'");
     await client.query(
@@ -2001,14 +2078,6 @@ async function prepareGoldenExecution(
       },
     };
   input = { ...input, expectedVersions: {} };
-  input = {
-    ...input,
-    expectedVersions: {
-      ...(await new PostgresManualResolutionAdapter(pool, {
-        schema,
-      }).discoverRequiredCurrentExpectations(input)),
-    },
-  };
   return { input, direct };
 }
 
@@ -2032,6 +2101,65 @@ async function count(client: PoolClient, table: string): Promise<number> {
 }
 
 describe("M02 durable PostgreSQL command adapter", () => {
+  it("rejects peer LOGIN attribute and outbound membership drift", async () => {
+    const harness = new EphemeralPostgresHarness();
+    const pool = await harness.start();
+    const schema = "m02_peer_authority_drift";
+    try {
+      await migrateSchema(pool, schema);
+      const prepared = prepareCommand("CREATE_RESOURCE", 29_001);
+      const adapter = new PostgresManualResolutionAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        { schema, peerLoginRole: "ai_ark_m04_login" },
+      );
+      await pool.query("GRANT ai_ark_m01_m02_writer TO ai_ark_m01_m02_login WITH SET FALSE");
+      await pool.query("GRANT ai_ark_m04_runtime TO ai_ark_m04_login WITH SET FALSE");
+      try {
+        await expect(
+          adapter.discoverRequiredCurrentExpectations(prepared.input),
+        ).resolves.toBeDefined();
+      } finally {
+        await pool.query("GRANT ai_ark_m01_m02_writer TO ai_ark_m01_m02_login WITH SET TRUE");
+        await pool.query("GRANT ai_ark_m04_runtime TO ai_ark_m04_login WITH SET TRUE");
+      }
+      await pool.query("ALTER ROLE ai_ark_m04_login BYPASSRLS");
+      try {
+        await expect(adapter.discoverRequiredCurrentExpectations(prepared.input)).rejects.toThrow(
+          "M04_DATABASE_ROLE_AUTHORITY_DRIFT",
+        );
+      } finally {
+        await pool.query("ALTER ROLE ai_ark_m04_login NOBYPASSRLS");
+      }
+      await pool.query("CREATE ROLE ai_ark_m04_peer_bridge NOLOGIN");
+      await pool.query("CREATE ROLE ai_ark_m04_peer_hostile NOLOGIN BYPASSRLS");
+      await pool.query("GRANT ai_ark_m04_peer_hostile TO ai_ark_m04_peer_bridge");
+      await pool.query("GRANT ai_ark_m04_peer_bridge TO ai_ark_m04_login");
+      try {
+        await expect(adapter.discoverRequiredCurrentExpectations(prepared.input)).rejects.toThrow(
+          "M04_DATABASE_ROLE_AUTHORITY_DRIFT",
+        );
+      } finally {
+        await pool.query("REVOKE ai_ark_m04_peer_bridge FROM ai_ark_m04_login");
+        await pool.query("REVOKE ai_ark_m04_peer_hostile FROM ai_ark_m04_peer_bridge");
+        await pool.query("DROP ROLE ai_ark_m04_peer_hostile");
+        await pool.query("DROP ROLE ai_ark_m04_peer_bridge");
+      }
+      await pool.query("CREATE ROLE ai_ark_m04_peer_inert NOLOGIN");
+      await pool.query(
+        "GRANT ai_ark_m04_peer_inert TO ai_ark_m04_login WITH INHERIT FALSE, SET FALSE",
+      );
+      try {
+        await expect(adapter.discoverRequiredCurrentExpectations(prepared.input)).rejects.toThrow(
+          "M04_DATABASE_ROLE_AUTHORITY_DRIFT",
+        );
+      } finally {
+        await pool.query("REVOKE ai_ark_m04_peer_inert FROM ai_ark_m04_login");
+        await pool.query("DROP ROLE ai_ark_m04_peer_inert");
+      }
+    } finally {
+      await harness.stop();
+    }
+  }, 120_000);
   beforeAll(async () => {
     [
       migration001,
@@ -2346,9 +2474,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
       payload: { ...prepared.input.payload, jobId: "job-other", reviewId: "review-other" },
     };
     await expect(
-      new PostgresManualResolutionAdapter(pool, { schema }).discoverRequiredCurrentExpectations(
-        mismatched,
-      ),
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).discoverRequiredCurrentExpectations(mismatched),
     ).rejects.toMatchObject({ code: "REFERENCE_INVALID" });
     await harness.stop();
   }, 120_000);
@@ -2364,22 +2493,26 @@ describe("M02 durable PostgreSQL command adapter", () => {
       targetId: "run-1",
     });
     expect(prepared.input.expectedVersions[clarificationTarget.key]).toBeNull();
-    const adapter = new PostgresManualResolutionAdapter(pool, {
-      schema,
-      onAttemptOpened: async () => {
-        await pool.query(
-          `INSERT INTO ${schema}.m02_concurrency_guards
+    const adapter = new PostgresManualResolutionAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      {
+        schema,
+        onAttemptOpened: async () => {
+          await pool.query(
+            `INSERT INTO ${schema}.m02_concurrency_guards
              (guard_key,guard_type,canonical_payload,payload_hash,record_version)
            VALUES ($1,$2,$3,$4,1)`,
-          [
-            clarificationTarget.key,
-            clarificationTarget.guardType,
-            Buffer.from(clarificationTarget.canonicalPayload),
-            createHash("sha256").update(clarificationTarget.canonicalPayload).digest("hex"),
-          ],
-        );
+            [
+              clarificationTarget.key,
+              clarificationTarget.guardType,
+              Buffer.from(clarificationTarget.canonicalPayload),
+              createHash("sha256").update(clarificationTarget.canonicalPayload).digest("hex"),
+            ],
+          );
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    });
+    );
     await expect(adapter.execute(prepared.input)).rejects.toMatchObject({
       code: "MUTATION_PLAN_CHANGED",
     });
@@ -2403,455 +2536,803 @@ describe("M02 durable PostgreSQL command adapter", () => {
     await harness.stop();
   }, 120_000);
 
-  it("executes all 256 golden PostgreSQL projection modes without leaking case state", async () => {
+  it("requires writer resource-candidate UPDATE on a real CREATE_RESOURCE path", async () => {
     const pool = await harness.start();
-    const schema = "m02_golden_256";
+    const schema = "m02_writer_cell_probe";
     await migrateSchema(pool, schema);
-    const committedModeIds: string[] = [];
-    const modeReceipts: unknown[] = [];
-    const topologyReceipts: unknown[] = [];
-    const replacementReceipts: unknown[] = [];
-    const auditReceipts: unknown[] = [];
-    const mappingAuditReceipts: unknown[] = [];
-    const guardReceipts: unknown[] = [];
+    const mode = humanProjectionModes()[0];
+    if (mode === undefined) throw new Error("M02_GOLDEN_MODE_MISSING");
+    const prepare = async (): Promise<ManualResolutionEnvelope> => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`SET LOCAL search_path TO ${schema}, public`);
+        await client.query("SET CONSTRAINTS ALL DEFERRED");
+        const { input } = await prepareGoldenExecution(
+          transactionBoundPool(client),
+          client,
+          schema,
+          mode,
+          0,
+        );
+        await client.query("COMMIT");
+        return input;
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+    };
+    const writerPool = harness.poolForRole("ai_ark_m01_m02_login");
+    const normal = new PostgresManualResolutionAdapter(writerPool, {
+      schema,
+      peerLoginRole: "ai_ark_m04_login",
+    });
     try {
-      for (const [index, mode] of humanProjectionModes().entries()) {
-        if (index > 0) await resetGoldenSchema(pool, schema);
-        const client = await pool.connect();
-        let setupCommitted = false;
+      const positivePrepared = await prepare();
+      const positive = {
+        ...positivePrepared,
+        expectedVersions: await normal.discoverRequiredCurrentExpectations(positivePrepared),
+      };
+      await expect(normal.execute(positive)).resolves.toMatchObject({
+        commandId: positive.commandId,
+      });
+      await resetGoldenSchema(pool, schema);
+      const negativePrepared = await prepare();
+      const negative = {
+        ...negativePrepared,
+        expectedVersions: await normal.discoverRequiredCurrentExpectations(negativePrepared),
+      };
+      const before = await pool.query<{ count: string }>(
+        `SELECT count(*)::text count FROM ${schema}.m02_manual_command_results`,
+      );
+      await pool.query(
+        `REVOKE UPDATE ON TABLE ${schema}.resource_candidates FROM ai_ark_m01_m02_writer`,
+      );
+      try {
+        const deniedCodes: string[] = [];
+        const faultPool = rollbackAndCaptureWriterPool(writerPool, deniedCodes);
+        const fault = new PostgresManualResolutionAdapter(faultPool, { schema });
+        (fault as unknown as { checkout(): Promise<PoolClient> }).checkout = () =>
+          faultPool.connect();
+        await expect(fault.execute(negative)).rejects.toThrow();
+        expect(deniedCodes).toContain("42501");
+        const after = await pool.query<{ count: string }>(
+          `SELECT count(*)::text count FROM ${schema}.m02_manual_command_results`,
+        );
+        expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+      } finally {
+        await pool.query(
+          `GRANT UPDATE ON TABLE ${schema}.resource_candidates TO ai_ark_m01_m02_writer`,
+        );
+      }
+    } finally {
+      await harness.stop();
+    }
+  }, 120_000);
+
+  it.each(
+    [
+      { object: "m02_rejected_command_audits", operation: "SELECT", kind: "TABLE" },
+      { object: "m02_rejected_command_audits", operation: "INSERT", kind: "TABLE" },
+      { object: "m02_rejected_command_audits_id_seq", operation: "USAGE", kind: "SEQUENCE" },
+    ].map((cell, index) => ({ ...cell, index })),
+  )(
+    "requires writer $object:$operation via PostgresManualResolutionAdapter.persistRejection",
+    async (cell) => {
+      const pool = await harness.start();
+      const schema = `m02_rejection_cell_${String(cell.index)}`;
+      await migrateSchema(pool, schema);
+      try {
+        await pool.query(
+          `SET search_path TO ${schema}, public;
+           SET session_replication_role = 'replica';
+           DELETE FROM identity_decisions WHERE id='decision-seed';
+           UPDATE resource_candidates
+             SET status='CLASSIFIED',identity_outcome=NULL,resource_identity_id=NULL,
+                 resource_version_identity_id=NULL,record_version=1
+             WHERE id='candidate-1';
+           SET session_replication_role = 'origin'`,
+        );
+        const prepared = prepareCommand("CREATE_RESOURCE", 20_000 + cell.index);
+        await persistPreparedCommand(pool, schema, prepared);
+        const invalid = {
+          ...prepared.input,
+          evidenceIds: ["evidence-missing"],
+          payload: { ...prepared.input.payload, reliableTokenEvidenceId: "evidence-missing" },
+        };
+        const writerPool = harness.poolForRole("ai_ark_m01_m02_login");
+        await pool.query(
+          `REVOKE ${cell.operation} ON ${cell.kind} ${schema}.${cell.object} FROM ai_ark_m01_m02_writer`,
+        );
+        try {
+          const deniedCodes: string[] = [];
+          const faultPool = rollbackAndCaptureWriterPool(writerPool, deniedCodes);
+          const fault = new PostgresManualResolutionAdapter(faultPool, { schema });
+          (fault as unknown as { checkout(): Promise<PoolClient> }).checkout = () =>
+            faultPool.connect();
+          await expect(fault.execute(invalid)).rejects.toMatchObject({
+            code: "REFERENCE_INVALID",
+          });
+          expect(deniedCodes, `${cell.object}:${cell.operation}:sql-necessity`).toContain("42501");
+          const absent = await pool.query<{ count: string }>(
+            `SELECT count(*)::text count FROM ${schema}.m02_rejected_command_audits
+             WHERE idempotency_key=$1`,
+            [invalid.idempotencyKey],
+          );
+          expect(absent.rows[0]?.count).toBe("0");
+        } finally {
+          await pool.query(
+            `GRANT ${cell.operation} ON ${cell.kind} ${schema}.${cell.object} TO ai_ark_m01_m02_writer`,
+          );
+        }
+        await expect(
+          new PostgresManualResolutionAdapter(writerPool, {
+            schema,
+            peerLoginRole: "ai_ark_m04_login",
+          }).execute(invalid),
+        ).rejects.toMatchObject({ code: "REFERENCE_INVALID" });
+        const acceptedAudit = await pool.query<{ count: string }>(
+          `SELECT count(*)::text count FROM ${schema}.m02_rejected_command_audits
+           WHERE idempotency_key=$1`,
+          [invalid.idempotencyKey],
+        );
+        expect(acceptedAudit.rows[0]?.count).toBe("1");
+      } finally {
+        await harness.stop();
+      }
+    },
+    120_000,
+  );
+
+  describe("writer manifest human-command privilege paths", () => {
+    const schema = "m02_writer_relation_matrix";
+    const systemOnly = new Set([
+      "acquisition_results",
+      "analysis_runs",
+      "external_identifiers",
+      "identity_decision_conflict_evidence",
+      "identity_decision_conflict_targets",
+      "identity_decision_conflicts",
+      "identity_decision_signal_evidence",
+      "identity_decision_signals",
+      "identity_decision_tier_evaluations",
+      "m02_rejected_command_audits",
+      "m02_rejected_system_identity_audits",
+      "m02_system_identity_operations",
+      "m02_system_identity_results",
+      "source_repository_urls",
+    ]);
+    const humanTransactionCells = new Set([
+      "m02_audit_events:INSERT",
+      "m02_concurrency_guards:INSERT",
+      "m02_concurrency_guards:UPDATE",
+      "m02_manual_command_results:INSERT",
+      "manual_resolution_commands:INSERT",
+    ]);
+    const relationCells = writerManifest.relations.flatMap(({ name, operations }) => {
+      if (systemOnly.has(name)) return [];
+      return operations.flatMap((operation) => {
+        const index = golden256.findIndex((entry) =>
+          operation === "INSERT"
+            ? (entry.exactCreateCounts[name] ?? 0) > 0
+            : operation === "UPDATE"
+              ? (entry.exactUpdateCounts[name] ?? 0) > 0 ||
+                (entry.exactSupersedeCounts[name] ?? 0) > 0
+              : (entry.exactCreateCounts[name] ?? 0) > 0 ||
+                (entry.exactUpdateCounts[name] ?? 0) > 0 ||
+                (entry.exactSupersedeCounts[name] ?? 0) > 0,
+        );
+        if (
+          index < 0 &&
+          operation !== "SELECT" &&
+          !humanTransactionCells.has(`${name}:${operation}`)
+        )
+          return [];
+        const selectedIndex = Math.max(0, index);
+        return [
+          {
+            name,
+            operation,
+            kind: "TABLE" as const,
+            index: selectedIndex,
+            modeId: humanProjectionModes()[selectedIndex]?.expansionId,
+          },
+        ];
+      });
+    });
+    const systemFunctionPrefixes = [
+      "m02_identity_conflict_",
+      "m02_identity_decision_input_json",
+      "m02_identity_signal_sort_key",
+      "m02_system_",
+      "m02_tier_sequence_valid",
+      "m02_uuid_array_is_canonical",
+    ];
+    const functionCells = writerManifest.functions.flatMap((signature) => {
+      if (systemFunctionPrefixes.some((prefix) => signature.startsWith(prefix))) return [];
+      const family = signature.startsWith("m02_replacement_metadata_shape_valid")
+        ? "REPLACE_M02_JOB"
+        : signature.startsWith("m02_relationship_endpoint_guard_ref_valid")
+          ? "MARK_FORK"
+          : signature.startsWith("m02_source_repository_guard_ref_valid")
+            ? "MARK_MIRROR"
+            : "CREATE_RESOURCE";
+      const index = humanProjectionModes().findIndex((mode) => mode.family === family);
+      if (index < 0) throw new Error(`M02_FUNCTION_PATH_MODE_MISSING:${family}`);
+      return [
+        {
+          name: signature,
+          operation: "EXECUTE",
+          kind: "FUNCTION" as const,
+          index,
+          modeId: humanProjectionModes()[index]?.expansionId,
+        },
+      ];
+    });
+    const cells = [...relationCells, ...functionCells];
+    let matrixPool: Pool;
+    let writerPool: Pool;
+    let normal: PostgresManualResolutionAdapter;
+    beforeAll(async () => {
+      matrixPool = await harness.start();
+      await migrateSchema(matrixPool, schema);
+      writerPool = harness.poolForRole("ai_ark_m01_m02_login");
+      normal = new PostgresManualResolutionAdapter(writerPool, {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      });
+    }, 120_000);
+    afterAll(async () => {
+      await harness.stop();
+    });
+    it.each(cells)(
+      "writer cell $name:$operation via PostgresManualResolutionAdapter.execute $modeId",
+      async (cell) => {
+        await resetGoldenSchema(matrixPool, schema);
+        const mode = humanProjectionModes()[cell.index];
+        if (mode === undefined) throw new Error(`M02_GOLDEN_MODE_MISSING:${String(cell.index)}`);
+        const client = await matrixPool.connect();
+        let prepared: ManualResolutionEnvelope;
         try {
           await client.query("BEGIN");
           await client.query(`SET LOCAL search_path TO ${schema}, public`);
           await client.query("SET CONSTRAINTS ALL DEFERRED");
-          const transactionPool = transactionBoundPool(client);
-          const expected = golden256[index];
-          if (expected === undefined) throw new Error(`GOLDEN_ORACLE_MISSING:${mode.expansionId}`);
-          const { input } = await prepareGoldenExecution(
-            transactionPool,
-            client,
-            schema,
-            mode,
-            index,
-          );
+          prepared = (
+            await prepareGoldenExecution(
+              transactionBoundPool(client),
+              client,
+              schema,
+              mode,
+              cell.index,
+            )
+          ).input;
           await client.query("COMMIT");
-          setupCommitted = true;
-          await client.query(`SET search_path TO ${schema}, public`);
-          let finalizedPlan: CommandMutationPlanV1 | undefined;
-          await new PostgresManualResolutionAdapter(pool, {
-            schema,
-            onPlanFinalized: (plan) => {
-              finalizedPlan = plan;
-            },
-          }).execute(input);
-          if (finalizedPlan === undefined)
-            throw new Error(`GOLDEN_PLAN_NOT_FINALIZED:${mode.expansionId}`);
-          const plan = finalizedPlan;
-          expect(plan.concurrencyPlan.expansionId, mode.expansionId).toBe(mode.expansionId);
-
-          const createTables = new Set(plan.domainMutationPlan.creates.map(({ table }) => table));
-          const updateTables = new Set(
-            [...plan.domainMutationPlan.updates, ...plan.domainMutationPlan.supersedes].map(
-              ({ table }) => table,
-            ),
-          );
-          for (const table of expected.requiredCreateTables)
-            expect(createTables.has(table), `${mode.expansionId}:create:${table}`).toBe(true);
-          for (const table of expected.requiredUpdateTables)
-            expect(updateTables.has(table), `${mode.expansionId}:update:${table}`).toBe(true);
-          const countByTable = (rows: readonly { readonly table: string }[]) =>
-            Object.fromEntries(
-              [...new Set(rows.map(({ table }) => table))]
-                .sort()
-                .map((table) => [table, rows.filter((row) => row.table === table).length]),
-            );
-          expect(
-            countByTable(plan.domainMutationPlan.creates),
-            `${mode.expansionId}:independent-exact-create-counts`,
-          ).toEqual(expected.exactCreateCounts);
-          expect(
-            countByTable(plan.domainMutationPlan.updates),
-            `${mode.expansionId}:independent-exact-update-counts`,
-          ).toEqual(expected.exactUpdateCounts);
-          expect(
-            countByTable(plan.domainMutationPlan.supersedes),
-            `${mode.expansionId}:independent-exact-supersede-counts`,
-          ).toEqual(expected.exactSupersedeCounts);
-          expect(
-            plan.concurrencyPlan.guardPlan.map(({ guardType }) => guardType).sort(),
-            `${mode.expansionId}:independent-exact-guard-types`,
-          ).toEqual(expected.exactGuardTypes);
-
-          const persistedPlanRows: unknown[] = [];
-          for (const intent of uniquePlanRows(plan)) {
-            const persisted = (
-              await client.query<{ value: Record<string, unknown> }>(
-                `SELECT to_jsonb(row_value) AS value FROM ${intent.table} row_value WHERE id=$1`,
-                [intent.id],
-              )
-            ).rows[0]?.value;
-            const normalizedPersisted = normalizeDatabaseValue(persisted);
-            expect(
-              normalizedPersisted,
-              `${mode.expansionId}:${intent.table}:${intent.id}:complete-plan-equality`,
-            ).toEqual(normalizeDatabaseValue(intent.completeTypedValues));
-            persistedPlanRows.push({
-              table: intent.table,
-              id: intent.id,
-              value: normalizedPersisted,
-            });
-          }
-
-          const persistedResult = (
-            await client.query<{ value: Record<string, unknown> }>(
-              `SELECT to_jsonb(row_value) AS value FROM m02_manual_command_results row_value
-               WHERE command_id=$1`,
-              [input.commandId],
-            )
-          ).rows[0]?.value;
-          expect(
-            normalizeDatabaseValue(persistedResult),
-            `${mode.expansionId}:complete-result-plan-equality`,
-          ).toEqual(
-            normalizeDatabaseValue({
-              ...plan.domainMutationPlan.result.completeTypedValues,
-              mutation_plan_fingerprint: plan.fingerprint,
-            }),
-          );
-          expect(persistedResult?.identity_projection_mode_id, mode.expansionId).toBe(
-            expected.requiredResultMode,
-          );
-          expect(persistedResult?.identity_outcome, mode.expansionId).toBe(
-            expected.requiredOutcome,
-          );
-          const identitySetCardinalities = {
-            createdResources: (persistedResult?.created_resource_identity_ids as unknown[]).length,
-            reusedResources: (persistedResult?.reused_resource_identity_ids as unknown[]).length,
-            createdVersions: (persistedResult?.created_resource_version_identity_ids as unknown[])
-              .length,
-            reusedVersions: (persistedResult?.reused_resource_version_identity_ids as unknown[])
-              .length,
-          };
-          expect(
-            identitySetCardinalities,
-            `${mode.expansionId}:independent-identity-set-cardinalities`,
-          ).toEqual(expected.identitySetCardinalities);
-          let finalCandidateReceipt: JsonValue = null;
-          if (expected.finalCandidate !== null) {
-            const candidate = (
-              await client.query<{
-                identity_outcome: string | null;
-                record_version: string;
-                resource_identity_id: string | null;
-                resource_version_identity_id: string | null;
-                status: string;
-              }>(
-                `SELECT status,identity_outcome,resource_identity_id,
-                        resource_version_identity_id,record_version
-                 FROM resource_candidates WHERE id=$1`,
-                [input.targetCandidateId],
-              )
-            ).rows[0];
-            expect(
-              candidate === undefined
-                ? undefined
-                : {
-                    status: candidate.status,
-                    identity_outcome: candidate.identity_outcome,
-                    record_version: Number(candidate.record_version),
-                  },
-              `${mode.expansionId}:independent-final-candidate`,
-            ).toEqual({
-              status: expected.finalCandidate.status,
-              identity_outcome: expected.finalCandidate.outcome,
-              record_version: expected.finalCandidate.recordVersion,
-            });
-            expect(candidate?.resource_identity_id !== null).toBe(
-              expected.finalCandidate.hasResourceIdentity,
-            );
-            expect(candidate?.resource_version_identity_id !== null).toBe(
-              expected.finalCandidate.hasResourceVersionIdentity,
-            );
-            finalCandidateReceipt = {
-              status: candidate?.status ?? null,
-              identityOutcome: candidate?.identity_outcome ?? null,
-              recordVersion: Number(candidate?.record_version ?? "0"),
-              hasResourceIdentity: candidate?.resource_identity_id !== null,
-              hasResourceVersionIdentity: candidate?.resource_version_identity_id !== null,
-            };
-          }
-
-          const persistedAudits = (
-            await client.query<{
-              action: string;
-              id: string;
-              subject_id: string;
-              subject_type: string;
-            }>(
-              `SELECT id,action,subject_type,subject_id FROM m02_audit_events
-               WHERE command_id=$1 ORDER BY convert_to(id,'UTF8')`,
-              [input.commandId],
-            )
-          ).rows;
-          const replacementEdges = (
-            await client.query<{ id: string }>(
-              `SELECT id FROM m02_job_supersessions
-               WHERE command_id=$1 ORDER BY convert_to(id,'UTF8')`,
-              [input.commandId],
-            )
-          ).rows.map(({ id }) => id);
-          const independentlyObservedTargets = [
-            ...new Set([
-              ...Object.entries(input.expectedVersions).flatMap(([key, version]) =>
-                key.startsWith("row:") && version !== null
-                  ? [key.split(":").slice(2).join(":")]
-                  : [],
-              ),
-              ...persistedAudits.flatMap(({ action, subject_id }) =>
-                action.startsWith("SUBJECT_") ? [subject_id] : [],
-              ),
-              ...replacementEdges,
-            ]),
-          ].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
-          expect(
-            persistedResult?.ordered_target_ids,
-            `${mode.expansionId}:independent-created-reused-updated-superseded-target-union`,
-          ).toEqual(independentlyObservedTargets);
-          expect(persistedAudits, `${mode.expansionId}:exact-audit-formula`).toEqual(
-            [...plan.domainMutationPlan.audits]
-              .map(({ id, action, subjectType, subjectId }) => ({
-                id,
-                action,
-                subject_type: subjectType,
-                subject_id: subjectId,
-              }))
-              .sort((left, right) => Buffer.compare(Buffer.from(left.id), Buffer.from(right.id))),
-          );
-          const expectedAuditCount =
-            1 +
-            Object.values(expected.exactCreateCounts).reduce((sum, count) => sum + count, 0) +
-            Object.values(expected.exactUpdateCounts).reduce((sum, count) => sum + count, 0) +
-            Object.values(expected.exactSupersedeCounts).reduce((sum, count) => sum + count, 0) -
-            (expected.exactCreateCounts.m02_job_supersessions ?? 0);
-          expect(
-            persistedAudits.length,
-            `${mode.expansionId}:independent-exact-audit-cardinality`,
-          ).toBe(expectedAuditCount);
-          const expectedAuditSubjects: Record<string, number> = {};
-          const addExpectedAudits = (
-            rows: Readonly<Record<string, number>>,
-            action: "SUBJECT_CREATED" | "SUBJECT_UPDATED" | "SUBJECT_SUPERSEDED",
-          ): void => {
-            for (const [table, tableCount] of Object.entries(rows)) {
-              if (table === "m02_job_supersessions") continue;
-              const subject = GOLDEN_AUDIT_SUBJECT_BY_TABLE[table];
-              if (subject === undefined) throw new Error(`GOLDEN_SUBJECT_MISSING:${table}`);
-              const effectiveAction =
-                table === "acquisition_jobs" && action === "SUBJECT_SUPERSEDED"
-                  ? "SUBJECT_UPDATED"
-                  : action;
-              const key = `${effectiveAction}:${subject}`;
-              expectedAuditSubjects[key] = (expectedAuditSubjects[key] ?? 0) + tableCount;
-            }
-          };
-          addExpectedAudits(expected.exactCreateCounts, "SUBJECT_CREATED");
-          addExpectedAudits(expected.exactUpdateCounts, "SUBJECT_UPDATED");
-          addExpectedAudits(expected.exactSupersedeCounts, "SUBJECT_SUPERSEDED");
-          const actualAuditSubjects = Object.fromEntries(
-            [
-              ...new Set(
-                persistedAudits
-                  .filter(({ action }) => action !== "COMMAND_ACCEPTED")
-                  .map(({ action, subject_type }) => `${action}:${subject_type}`),
-              ),
-            ]
-              .sort()
-              .map((key) => [
-                key,
-                persistedAudits.filter(
-                  ({ action, subject_type }) => `${action}:${subject_type}` === key,
-                ).length,
-              ]),
-          );
-          expect(
-            actualAuditSubjects,
-            `${mode.expansionId}:independent-exact-audit-subject-actions`,
-          ).toEqual(expectedAuditSubjects);
-
-          const auditTransitionRows = (
-            await client.query<{
-              action: string;
-              after_state: unknown;
-              after_version: string | null;
-              before_state: unknown;
-              before_version: string | null;
-              subject_id: string;
-              subject_type: string;
-            }>(
-              `SELECT action,subject_type,subject_id,before_version::text,after_version::text,
-                      before_state,after_state
-               FROM m02_audit_events WHERE command_id=$1
-               ORDER BY convert_to(id,'UTF8')`,
-              [input.commandId],
-            )
-          ).rows;
-          expect(auditTransitionRows).toHaveLength(persistedAudits.length);
-          const auditTransitions = auditTransitionRows
-            .map((row) => ({
-              action: row.action,
-              subjectType: row.subject_type,
-              beforeVersion: row.before_version,
-              afterVersion: row.after_version,
-              beforeState: stableStateReceipt(row.before_state),
-              afterState: stableStateReceipt(row.after_state),
-            }))
-            .sort((left, right) =>
-              Buffer.compare(Buffer.from(canonicalJson(left)), Buffer.from(canonicalJson(right))),
-            );
-
-          const persistedGuardRows: unknown[] = [];
-          for (const guard of plan.concurrencyPlan.guardPlan) {
-            const persisted = (
-              await client.query<{
-                canonical_payload_base64: string;
-                guard_type: string;
-                record_version: string;
-              }>(
-                `SELECT replace(encode(canonical_payload,'base64'), E'\\n', '') AS canonical_payload_base64,
-                        guard_type,record_version
-                 FROM m02_concurrency_guards WHERE guard_key=$1`,
-                [guard.key],
-              )
-            ).rows[0];
-            expect(
-              persisted === undefined
-                ? undefined
-                : { ...persisted, record_version: Number(persisted.record_version) },
-              `${mode.expansionId}:guard:${guard.key}`,
-            ).toEqual({
-              canonical_payload_base64: guard.canonicalPayloadBase64,
-              guard_type: guard.guardType,
-              record_version:
-                guard.operation === "CREATE"
-                  ? 1
-                  : guard.operation === "INCREMENT"
-                    ? (guard.expectedVersion ?? 0) + 1
-                    : guard.expectedVersion,
-            });
-            persistedGuardRows.push({
-              guardKey: guard.key,
-              expectedOperation: guard.operation,
-              persisted: normalizeDatabaseValue(persisted),
-            });
-          }
-          expect(
-            Number(
-              (
-                await client.query<{ count: string }>(
-                  "SELECT count(*) FROM m02_command_domain_records",
-                )
-              ).rows[0]?.count ?? "0",
-            ),
-            `${mode.expansionId}:zero-generic-ledger`,
-          ).toBe(0);
-
-          const receipt = {
-            expansionId: mode.expansionId,
-            family: mode.family,
-            typedPlanRows: persistedRowsReceipt(persistedPlanRows),
-            result: stableStateReceipt(persistedResult),
-            identitySetCardinalities,
-            finalCandidate: finalCandidateReceipt,
-            auditCount: auditTransitions.length,
-            guardCount: persistedGuardRows.length,
-            typedPlanEquality: true,
-            typedResultEquality: true,
-            postconditionsMatched: true,
-          };
-          committedModeIds.push(mode.expansionId);
-          modeReceipts.push(receipt);
-          auditReceipts.push({
-            expansionId: mode.expansionId,
-            transitions: auditTransitions,
-          });
-          guardReceipts.push({
-            expansionId: mode.expansionId,
-            guards: persistedGuardRows,
-          });
-          if (["SPLIT_ROOTS", "MERGE_ROOTS", "OVERRIDE_NON_SKILL"].includes(mode.family)) {
-            const topologyReceipt = {
-              expansionId: mode.expansionId,
-              rows: persistedRowsReceipt(
-                persistedPlanRows.filter(
-                  (row) =>
-                    typeof row === "object" &&
-                    row !== null &&
-                    "table" in row &&
-                    [
-                      "candidate_roots",
-                      "resource_candidates",
-                      "candidate_root_ownership",
-                      "repository_group_relationships",
-                      "m02_root_replacements",
-                      "m02_candidate_replacements",
-                      "m02_ownership_replacements",
-                      "m02_group_edge_replacements",
-                    ].includes(String(row.table)),
-                ),
-              ),
-              audits: auditTransitions,
-            };
-            topologyReceipts.push(topologyReceipt);
-            mappingAuditReceipts.push({
-              expansionId: mode.expansionId,
-              mappingRows: persistedRowsReceipt(
-                persistedPlanRows.filter(
-                  (row) =>
-                    typeof row === "object" &&
-                    row !== null &&
-                    "table" in row &&
-                    String(row.table).startsWith("m02_") &&
-                    String(row.table).endsWith("_replacements"),
-                ),
-              ),
-              audits: auditTransitions,
-            });
-          }
-          if (mode.family === "REPLACE_M02_JOB")
-            replacementReceipts.push({
-              expansionId: mode.expansionId,
-              rows: persistedRowsReceipt(persistedPlanRows),
-              audits: auditTransitions,
-            });
         } catch (error) {
-          if (!setupCommitted) await client.query("ROLLBACK");
-          throw new Error(`${mode.expansionId}: ${(error as Error).message}`, { cause: error });
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw error;
         } finally {
           client.release();
         }
-      }
-      expect(committedModeIds).toHaveLength(256);
-      expect(new Set(committedModeIds).size).toBe(256);
-      expect(modeReceipts).toHaveLength(256);
-      expect(topologyReceipts).toHaveLength(9);
-      expect(replacementReceipts).toHaveLength(4);
-      expect(auditReceipts).toHaveLength(256);
-      expect(mappingAuditReceipts).toHaveLength(9);
-      expect(guardReceipts).toHaveLength(256);
-      humanExecutedReceipts.record("F37", "modes.committed_ids", committedModeIds);
-      humanExecutedReceipts.record("F37", "modes.plan_result_postconditions", modeReceipts);
-      humanExecutedReceipts.record("F38", "topology.rows_mappings_history", topologyReceipts);
-      humanExecutedReceipts.record(
-        "F39",
-        "replacement.modes_and_predecessors",
+        const command = {
+          ...prepared,
+          expectedVersions: await normal.discoverRequiredCurrentExpectations(prepared),
+        };
+        const before = await matrixPool.query<{ count: string }>(
+          `SELECT count(*)::text count FROM ${schema}.m02_manual_command_results`,
+        );
+        await matrixPool.query(
+          `REVOKE ${cell.operation} ON ${cell.kind} ${schema}.${cell.name} FROM ai_ark_m01_m02_writer`,
+        );
+        try {
+          const deniedCodes: string[] = [];
+          const faultPool = rollbackAndCaptureWriterPool(writerPool, deniedCodes);
+          const fault = new PostgresManualResolutionAdapter(faultPool, { schema });
+          (fault as unknown as { checkout(): Promise<PoolClient> }).checkout = () =>
+            faultPool.connect();
+          await expect(fault.execute(command)).rejects.toThrow();
+          expect(
+            deniedCodes.includes("42501") ||
+              (cell.kind === "FUNCTION" && deniedCodes.includes("23514")),
+            `${cell.name}:${cell.operation}:sql-necessity:${deniedCodes.join(",")}`,
+          ).toBe(true);
+          const after = await matrixPool.query<{ count: string }>(
+            `SELECT count(*)::text count FROM ${schema}.m02_manual_command_results`,
+          );
+          expect(after.rows[0]?.count, `${cell.name}:${cell.operation}:zero-side-effect`).toBe(
+            before.rows[0]?.count,
+          );
+        } finally {
+          await matrixPool.query(
+            `GRANT ${cell.operation} ON ${cell.kind} ${schema}.${cell.name} TO ai_ark_m01_m02_writer`,
+          );
+        }
+        await expect(normal.execute(command)).resolves.toMatchObject({
+          commandId: command.commandId,
+        });
+      },
+      120_000,
+    );
+  });
+
+  const goldenReceipts = {
+    committedModeIds: [] as string[],
+    modeReceipts: [] as unknown[],
+    topologyReceipts: [] as unknown[],
+    replacementReceipts: [] as unknown[],
+    auditReceipts: [] as unknown[],
+    mappingAuditReceipts: [] as unknown[],
+    guardReceipts: [] as unknown[],
+  };
+  const goldenChunkSize = 16;
+  for (const chunk of Array.from({ length: 16 }, (_, index) => index))
+    it(`executes golden PostgreSQL projection modes ${String(chunk * goldenChunkSize + 1)}-${String((chunk + 1) * goldenChunkSize)} without leaking case state`, async () => {
+      const pool = await harness.start();
+      const schema = "m02_golden_256";
+      await migrateSchema(pool, schema);
+      const {
+        committedModeIds,
+        modeReceipts,
+        topologyReceipts,
         replacementReceipts,
-      );
-      humanExecutedReceipts.record("F40", "audits.actions_subjects_before_after", auditReceipts);
-      humanExecutedReceipts.record("F40", "audits.mapping_cardinality", mappingAuditReceipts);
-      humanExecutedReceipts.record("F41", "guards.all_mode_rows", guardReceipts);
-    } finally {
-      await harness.stop();
-    }
-  }, 900_000);
+        auditReceipts,
+        mappingAuditReceipts,
+        guardReceipts,
+      } = goldenReceipts;
+      try {
+        for (const [index, mode] of humanProjectionModes().entries()) {
+          if (index < chunk * goldenChunkSize || index >= (chunk + 1) * goldenChunkSize) continue;
+          if (index > chunk * goldenChunkSize) await resetGoldenSchema(pool, schema);
+          const client = await pool.connect();
+          let setupCommitted = false;
+          try {
+            await client.query("BEGIN");
+            await client.query(`SET LOCAL search_path TO ${schema}, public`);
+            await client.query("SET CONSTRAINTS ALL DEFERRED");
+            const transactionPool = transactionBoundPool(client);
+            const expected = golden256[index];
+            if (expected === undefined)
+              throw new Error(`GOLDEN_ORACLE_MISSING:${mode.expansionId}`);
+            let { input } = await prepareGoldenExecution(
+              transactionPool,
+              client,
+              schema,
+              mode,
+              index,
+            );
+            await client.query("COMMIT");
+            setupCommitted = true;
+            await client.query(`SET search_path TO ${schema}, public`);
+            let finalizedPlan: CommandMutationPlanV1 | undefined;
+            const writerAdapter = new PostgresManualResolutionAdapter(
+              harness.poolForRole("ai_ark_m01_m02_login"),
+              {
+                schema,
+                onPlanFinalized: (plan) => {
+                  finalizedPlan = plan;
+                },
+                peerLoginRole: "ai_ark_m04_login",
+              },
+            );
+            input = {
+              ...input,
+              expectedVersions: {
+                ...(await writerAdapter.discoverRequiredCurrentExpectations(input)),
+              },
+            };
+            await writerAdapter.execute(input);
+            if (finalizedPlan === undefined)
+              throw new Error(`GOLDEN_PLAN_NOT_FINALIZED:${mode.expansionId}`);
+            const plan = finalizedPlan;
+            expect(plan.concurrencyPlan.expansionId, mode.expansionId).toBe(mode.expansionId);
+
+            const createTables = new Set(plan.domainMutationPlan.creates.map(({ table }) => table));
+            const updateTables = new Set(
+              [...plan.domainMutationPlan.updates, ...plan.domainMutationPlan.supersedes].map(
+                ({ table }) => table,
+              ),
+            );
+            for (const table of expected.requiredCreateTables)
+              expect(createTables.has(table), `${mode.expansionId}:create:${table}`).toBe(true);
+            for (const table of expected.requiredUpdateTables)
+              expect(updateTables.has(table), `${mode.expansionId}:update:${table}`).toBe(true);
+            const countByTable = (rows: readonly { readonly table: string }[]) =>
+              Object.fromEntries(
+                [...new Set(rows.map(({ table }) => table))]
+                  .sort()
+                  .map((table) => [table, rows.filter((row) => row.table === table).length]),
+              );
+            expect(
+              countByTable(plan.domainMutationPlan.creates),
+              `${mode.expansionId}:independent-exact-create-counts`,
+            ).toEqual(expected.exactCreateCounts);
+            expect(
+              countByTable(plan.domainMutationPlan.updates),
+              `${mode.expansionId}:independent-exact-update-counts`,
+            ).toEqual(expected.exactUpdateCounts);
+            expect(
+              countByTable(plan.domainMutationPlan.supersedes),
+              `${mode.expansionId}:independent-exact-supersede-counts`,
+            ).toEqual(expected.exactSupersedeCounts);
+            expect(
+              plan.concurrencyPlan.guardPlan.map(({ guardType }) => guardType).sort(),
+              `${mode.expansionId}:independent-exact-guard-types`,
+            ).toEqual(expected.exactGuardTypes);
+
+            const persistedPlanRows: unknown[] = [];
+            for (const intent of uniquePlanRows(plan)) {
+              const persisted = (
+                await client.query<{ value: Record<string, unknown> }>(
+                  `SELECT to_jsonb(row_value) AS value FROM ${intent.table} row_value WHERE id=$1`,
+                  [intent.id],
+                )
+              ).rows[0]?.value;
+              const normalizedPersisted = normalizeDatabaseValue(persisted);
+              expect(
+                normalizedPersisted,
+                `${mode.expansionId}:${intent.table}:${intent.id}:complete-plan-equality`,
+              ).toEqual(normalizeDatabaseValue(intent.completeTypedValues));
+              persistedPlanRows.push({
+                table: intent.table,
+                id: intent.id,
+                value: normalizedPersisted,
+              });
+            }
+
+            const persistedResult = (
+              await client.query<{ value: Record<string, unknown> }>(
+                `SELECT to_jsonb(row_value) AS value FROM m02_manual_command_results row_value
+               WHERE command_id=$1`,
+                [input.commandId],
+              )
+            ).rows[0]?.value;
+            expect(
+              normalizeDatabaseValue(persistedResult),
+              `${mode.expansionId}:complete-result-plan-equality`,
+            ).toEqual(
+              normalizeDatabaseValue({
+                ...plan.domainMutationPlan.result.completeTypedValues,
+                mutation_plan_fingerprint: plan.fingerprint,
+              }),
+            );
+            expect(persistedResult?.identity_projection_mode_id, mode.expansionId).toBe(
+              expected.requiredResultMode,
+            );
+            expect(persistedResult?.identity_outcome, mode.expansionId).toBe(
+              expected.requiredOutcome,
+            );
+            const identitySetCardinalities = {
+              createdResources: (persistedResult?.created_resource_identity_ids as unknown[])
+                .length,
+              reusedResources: (persistedResult?.reused_resource_identity_ids as unknown[]).length,
+              createdVersions: (persistedResult?.created_resource_version_identity_ids as unknown[])
+                .length,
+              reusedVersions: (persistedResult?.reused_resource_version_identity_ids as unknown[])
+                .length,
+            };
+            expect(
+              identitySetCardinalities,
+              `${mode.expansionId}:independent-identity-set-cardinalities`,
+            ).toEqual(expected.identitySetCardinalities);
+            let finalCandidateReceipt: JsonValue = null;
+            if (expected.finalCandidate !== null) {
+              const candidate = (
+                await client.query<{
+                  identity_outcome: string | null;
+                  record_version: string;
+                  resource_identity_id: string | null;
+                  resource_version_identity_id: string | null;
+                  status: string;
+                }>(
+                  `SELECT status,identity_outcome,resource_identity_id,
+                        resource_version_identity_id,record_version
+                 FROM resource_candidates WHERE id=$1`,
+                  [input.targetCandidateId],
+                )
+              ).rows[0];
+              expect(
+                candidate === undefined
+                  ? undefined
+                  : {
+                      status: candidate.status,
+                      identity_outcome: candidate.identity_outcome,
+                      record_version: Number(candidate.record_version),
+                    },
+                `${mode.expansionId}:independent-final-candidate`,
+              ).toEqual({
+                status: expected.finalCandidate.status,
+                identity_outcome: expected.finalCandidate.outcome,
+                record_version: expected.finalCandidate.recordVersion,
+              });
+              expect(candidate?.resource_identity_id !== null).toBe(
+                expected.finalCandidate.hasResourceIdentity,
+              );
+              expect(candidate?.resource_version_identity_id !== null).toBe(
+                expected.finalCandidate.hasResourceVersionIdentity,
+              );
+              finalCandidateReceipt = {
+                status: candidate?.status ?? null,
+                identityOutcome: candidate?.identity_outcome ?? null,
+                recordVersion: Number(candidate?.record_version ?? "0"),
+                hasResourceIdentity: candidate?.resource_identity_id !== null,
+                hasResourceVersionIdentity: candidate?.resource_version_identity_id !== null,
+              };
+            }
+
+            const persistedAudits = (
+              await client.query<{
+                action: string;
+                id: string;
+                subject_id: string;
+                subject_type: string;
+              }>(
+                `SELECT id,action,subject_type,subject_id FROM m02_audit_events
+               WHERE command_id=$1 ORDER BY convert_to(id,'UTF8')`,
+                [input.commandId],
+              )
+            ).rows;
+            const replacementEdges = (
+              await client.query<{ id: string }>(
+                `SELECT id FROM m02_job_supersessions
+               WHERE command_id=$1 ORDER BY convert_to(id,'UTF8')`,
+                [input.commandId],
+              )
+            ).rows.map(({ id }) => id);
+            const independentlyObservedTargets = [
+              ...new Set([
+                ...Object.entries(input.expectedVersions).flatMap(([key, version]) =>
+                  key.startsWith("row:") && version !== null
+                    ? [key.split(":").slice(2).join(":")]
+                    : [],
+                ),
+                ...persistedAudits.flatMap(({ action, subject_id }) =>
+                  action.startsWith("SUBJECT_") ? [subject_id] : [],
+                ),
+                ...replacementEdges,
+              ]),
+            ].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+            expect(
+              persistedResult?.ordered_target_ids,
+              `${mode.expansionId}:independent-created-reused-updated-superseded-target-union`,
+            ).toEqual(independentlyObservedTargets);
+            expect(persistedAudits, `${mode.expansionId}:exact-audit-formula`).toEqual(
+              [...plan.domainMutationPlan.audits]
+                .map(({ id, action, subjectType, subjectId }) => ({
+                  id,
+                  action,
+                  subject_type: subjectType,
+                  subject_id: subjectId,
+                }))
+                .sort((left, right) => Buffer.compare(Buffer.from(left.id), Buffer.from(right.id))),
+            );
+            const expectedAuditCount =
+              1 +
+              Object.values(expected.exactCreateCounts).reduce((sum, count) => sum + count, 0) +
+              Object.values(expected.exactUpdateCounts).reduce((sum, count) => sum + count, 0) +
+              Object.values(expected.exactSupersedeCounts).reduce((sum, count) => sum + count, 0) -
+              (expected.exactCreateCounts.m02_job_supersessions ?? 0);
+            expect(
+              persistedAudits.length,
+              `${mode.expansionId}:independent-exact-audit-cardinality`,
+            ).toBe(expectedAuditCount);
+            const expectedAuditSubjects: Record<string, number> = {};
+            const addExpectedAudits = (
+              rows: Readonly<Record<string, number>>,
+              action: "SUBJECT_CREATED" | "SUBJECT_UPDATED" | "SUBJECT_SUPERSEDED",
+            ): void => {
+              for (const [table, tableCount] of Object.entries(rows)) {
+                if (table === "m02_job_supersessions") continue;
+                const subject = GOLDEN_AUDIT_SUBJECT_BY_TABLE[table];
+                if (subject === undefined) throw new Error(`GOLDEN_SUBJECT_MISSING:${table}`);
+                const effectiveAction =
+                  table === "acquisition_jobs" && action === "SUBJECT_SUPERSEDED"
+                    ? "SUBJECT_UPDATED"
+                    : action;
+                const key = `${effectiveAction}:${subject}`;
+                expectedAuditSubjects[key] = (expectedAuditSubjects[key] ?? 0) + tableCount;
+              }
+            };
+            addExpectedAudits(expected.exactCreateCounts, "SUBJECT_CREATED");
+            addExpectedAudits(expected.exactUpdateCounts, "SUBJECT_UPDATED");
+            addExpectedAudits(expected.exactSupersedeCounts, "SUBJECT_SUPERSEDED");
+            const actualAuditSubjects = Object.fromEntries(
+              [
+                ...new Set(
+                  persistedAudits
+                    .filter(({ action }) => action !== "COMMAND_ACCEPTED")
+                    .map(({ action, subject_type }) => `${action}:${subject_type}`),
+                ),
+              ]
+                .sort()
+                .map((key) => [
+                  key,
+                  persistedAudits.filter(
+                    ({ action, subject_type }) => `${action}:${subject_type}` === key,
+                  ).length,
+                ]),
+            );
+            expect(
+              actualAuditSubjects,
+              `${mode.expansionId}:independent-exact-audit-subject-actions`,
+            ).toEqual(expectedAuditSubjects);
+
+            const auditTransitionRows = (
+              await client.query<{
+                action: string;
+                after_state: unknown;
+                after_version: string | null;
+                before_state: unknown;
+                before_version: string | null;
+                subject_id: string;
+                subject_type: string;
+              }>(
+                `SELECT action,subject_type,subject_id,before_version::text,after_version::text,
+                      before_state,after_state
+               FROM m02_audit_events WHERE command_id=$1
+               ORDER BY convert_to(id,'UTF8')`,
+                [input.commandId],
+              )
+            ).rows;
+            expect(auditTransitionRows).toHaveLength(persistedAudits.length);
+            const auditTransitions = auditTransitionRows
+              .map((row) => ({
+                action: row.action,
+                subjectType: row.subject_type,
+                beforeVersion: row.before_version,
+                afterVersion: row.after_version,
+                beforeState: stableStateReceipt(row.before_state),
+                afterState: stableStateReceipt(row.after_state),
+              }))
+              .sort((left, right) =>
+                Buffer.compare(Buffer.from(canonicalJson(left)), Buffer.from(canonicalJson(right))),
+              );
+
+            const persistedGuardRows: unknown[] = [];
+            for (const guard of plan.concurrencyPlan.guardPlan) {
+              const persisted = (
+                await client.query<{
+                  canonical_payload_base64: string;
+                  guard_type: string;
+                  record_version: string;
+                }>(
+                  `SELECT replace(encode(canonical_payload,'base64'), E'\\n', '') AS canonical_payload_base64,
+                        guard_type,record_version
+                 FROM m02_concurrency_guards WHERE guard_key=$1`,
+                  [guard.key],
+                )
+              ).rows[0];
+              expect(
+                persisted === undefined
+                  ? undefined
+                  : { ...persisted, record_version: Number(persisted.record_version) },
+                `${mode.expansionId}:guard:${guard.key}`,
+              ).toEqual({
+                canonical_payload_base64: guard.canonicalPayloadBase64,
+                guard_type: guard.guardType,
+                record_version:
+                  guard.operation === "CREATE"
+                    ? 1
+                    : guard.operation === "INCREMENT"
+                      ? (guard.expectedVersion ?? 0) + 1
+                      : guard.expectedVersion,
+              });
+              persistedGuardRows.push({
+                guardKey: guard.key,
+                expectedOperation: guard.operation,
+                persisted: normalizeDatabaseValue(persisted),
+              });
+            }
+            expect(
+              Number(
+                (
+                  await client.query<{ count: string }>(
+                    "SELECT count(*) FROM m02_command_domain_records",
+                  )
+                ).rows[0]?.count ?? "0",
+              ),
+              `${mode.expansionId}:zero-generic-ledger`,
+            ).toBe(0);
+
+            const receipt = {
+              expansionId: mode.expansionId,
+              family: mode.family,
+              typedPlanRows: persistedRowsReceipt(persistedPlanRows),
+              result: stableStateReceipt(persistedResult),
+              identitySetCardinalities,
+              finalCandidate: finalCandidateReceipt,
+              auditCount: auditTransitions.length,
+              guardCount: persistedGuardRows.length,
+              typedPlanEquality: true,
+              typedResultEquality: true,
+              postconditionsMatched: true,
+            };
+            committedModeIds.push(mode.expansionId);
+            modeReceipts.push(receipt);
+            auditReceipts.push({
+              expansionId: mode.expansionId,
+              transitions: auditTransitions,
+            });
+            guardReceipts.push({
+              expansionId: mode.expansionId,
+              guards: persistedGuardRows,
+            });
+            if (["SPLIT_ROOTS", "MERGE_ROOTS", "OVERRIDE_NON_SKILL"].includes(mode.family)) {
+              const topologyReceipt = {
+                expansionId: mode.expansionId,
+                rows: persistedRowsReceipt(
+                  persistedPlanRows.filter(
+                    (row) =>
+                      typeof row === "object" &&
+                      row !== null &&
+                      "table" in row &&
+                      [
+                        "candidate_roots",
+                        "resource_candidates",
+                        "candidate_root_ownership",
+                        "repository_group_relationships",
+                        "m02_root_replacements",
+                        "m02_candidate_replacements",
+                        "m02_ownership_replacements",
+                        "m02_group_edge_replacements",
+                      ].includes(String(row.table)),
+                  ),
+                ),
+                audits: auditTransitions,
+              };
+              topologyReceipts.push(topologyReceipt);
+              mappingAuditReceipts.push({
+                expansionId: mode.expansionId,
+                mappingRows: persistedRowsReceipt(
+                  persistedPlanRows.filter(
+                    (row) =>
+                      typeof row === "object" &&
+                      row !== null &&
+                      "table" in row &&
+                      String(row.table).startsWith("m02_") &&
+                      String(row.table).endsWith("_replacements"),
+                  ),
+                ),
+                audits: auditTransitions,
+              });
+            }
+            if (mode.family === "REPLACE_M02_JOB")
+              replacementReceipts.push({
+                expansionId: mode.expansionId,
+                rows: persistedRowsReceipt(persistedPlanRows),
+                audits: auditTransitions,
+              });
+          } catch (error) {
+            if (!setupCommitted) await client.query("ROLLBACK");
+            throw new Error(`${mode.expansionId}: ${(error as Error).message}`, { cause: error });
+          } finally {
+            client.release();
+          }
+        }
+        if (chunk !== 15) return;
+        expect(committedModeIds).toHaveLength(256);
+        expect(new Set(committedModeIds).size).toBe(256);
+        expect(modeReceipts).toHaveLength(256);
+        expect(topologyReceipts).toHaveLength(9);
+        expect(replacementReceipts).toHaveLength(4);
+        expect(auditReceipts).toHaveLength(256);
+        expect(mappingAuditReceipts).toHaveLength(9);
+        expect(guardReceipts).toHaveLength(256);
+        humanExecutedReceipts.record("F37", "modes.committed_ids", committedModeIds);
+        humanExecutedReceipts.record("F37", "modes.plan_result_postconditions", modeReceipts);
+        humanExecutedReceipts.record("F38", "topology.rows_mappings_history", topologyReceipts);
+        humanExecutedReceipts.record(
+          "F39",
+          "replacement.modes_and_predecessors",
+          replacementReceipts,
+        );
+        humanExecutedReceipts.record("F40", "audits.actions_subjects_before_after", auditReceipts);
+        humanExecutedReceipts.record("F40", "audits.mapping_cardinality", mappingAuditReceipts);
+        humanExecutedReceipts.record("F41", "guards.all_mode_rows", guardReceipts);
+      } finally {
+        await harness.stop();
+      }
+    }, 900_000);
 
   it("executes a command atomically and replays its result after adapter restart", async () => {
     const pool = await harness.start();
@@ -2868,11 +3349,13 @@ describe("M02 durable PostgreSQL command adapter", () => {
     );
     const provisionalCommand = rejectionCommand();
     let finalizedPlan: CommandMutationPlanV1 | undefined;
-    const firstAdapter = new PostgresManualResolutionAdapter(pool, {
+    const writerPool = harness.poolForRole("ai_ark_m01_m02_login");
+    const firstAdapter = new PostgresManualResolutionAdapter(writerPool, {
       schema: "m02_command_restart",
       onPlanFinalized: (plan) => {
         finalizedPlan = plan;
       },
+      peerLoginRole: "ai_ark_m04_login",
     });
     const command = {
       ...provisionalCommand,
@@ -2884,8 +3367,9 @@ describe("M02 durable PostgreSQL command adapter", () => {
       Object.keys(command.expectedVersions).filter((key) => !key.startsWith("guard:")),
     ).toSatisfy((keys: string[]) => keys.length > 0 && keys.every((key) => key.startsWith("row:")));
     const first = await firstAdapter.execute(command);
-    const replay = await new PostgresManualResolutionAdapter(pool, {
+    const replay = await new PostgresManualResolutionAdapter(writerPool, {
       schema: "m02_command_restart",
+      peerLoginRole: "ai_ark_m04_login",
     }).execute(command);
     expect(replay).toEqual(first);
     expect(first.transactionIsolation).toBe("SERIALIZABLE");
@@ -2999,22 +3483,30 @@ describe("M02 durable PostgreSQL command adapter", () => {
         if (openedAttempts === 2) releasePreflightBarrier();
         await preflightBarrier;
       };
-      const adapterA = new PostgresManualResolutionAdapter(pool, {
-        schema: "m02_command_concurrency",
-        onAttemptOpened: async (attempt) => {
-          attemptsA.push(attempt);
-          await waitForBothPreflights();
+      const adapterA = new PostgresManualResolutionAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        {
+          schema: "m02_command_concurrency",
+          onAttemptOpened: async (attempt) => {
+            attemptsA.push(attempt);
+            await waitForBothPreflights();
+          },
+          onUniqueViolation: (evidence) => uniqueViolations.push(evidence),
+          peerLoginRole: "ai_ark_m04_login",
         },
-        onUniqueViolation: (evidence) => uniqueViolations.push(evidence),
-      });
-      const adapterB = new PostgresManualResolutionAdapter(pool, {
-        schema: "m02_command_concurrency",
-        onAttemptOpened: async (attempt) => {
-          attemptsB.push(attempt);
-          await waitForBothPreflights();
+      );
+      const adapterB = new PostgresManualResolutionAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        {
+          schema: "m02_command_concurrency",
+          onAttemptOpened: async (attempt) => {
+            attemptsB.push(attempt);
+            await waitForBothPreflights();
+          },
+          onUniqueViolation: (evidence) => uniqueViolations.push(evidence),
+          peerLoginRole: "ai_ark_m04_login",
         },
-        onUniqueViolation: (evidence) => uniqueViolations.push(evidence),
-      });
+      );
       const provisionalA = rejectionCommand();
       const provisionalB = rejectionCommand({
         commandId: "command-reject-2",
@@ -3093,7 +3585,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
       if (firstOutcome === undefined) throw new Error("CONCURRENCY_OUTCOME_MISSING");
       const acceptedCommand = firstOutcome.status === "fulfilled" ? commandA : commandB;
       await expect(
-        new PostgresManualResolutionAdapter(pool, { schema: "m02_command_concurrency" }).execute({
+        new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+          schema: "m02_command_concurrency",
+          peerLoginRole: "ai_ark_m04_login",
+        }).execute({
           ...acceptedCommand,
           reason: "Changed payload reusing the same idempotency key.",
         }),
@@ -3113,189 +3608,112 @@ describe("M02 durable PostgreSQL command adapter", () => {
     }
   }, 120_000);
 
-  it("routes every approved M02 command through durable records, audit, and restart replay", async () => {
-    const pool = await harness.start();
-    for (const [index, command] of commands.entries()) {
-      const schema = `m02_all_${String(index)}`;
-      await migrateSchema(pool, schema);
-      const prepared = ["MARK_FORK", "MARK_MIRROR", "MARK_DUPLICATE"].includes(command)
-        ? prepareCorrection(
-            command as "MARK_FORK" | "MARK_MIRROR" | "MARK_DUPLICATE",
-            1_000 + index,
-          )
-        : prepareCommand(command, 1_000 + index);
-      try {
-        await persistPreparedCommand(pool, schema, prepared, "ALL_COMMAND");
-      } catch (error) {
-        throw new Error(`${command} discovery: ${(error as Error).message}`, { cause: error });
-      }
-      let result;
-      let finalizedPlan: CommandMutationPlanV1 | undefined;
-      try {
-        result = await new PostgresManualResolutionAdapter(pool, {
-          schema,
-          onPlanFinalized: (plan) => {
-            finalizedPlan = plan;
-          },
-        }).execute(prepared.input);
-      } catch (error) {
-        throw new Error(`${command}: ${(error as Error).message}`, { cause: error });
-      }
-      expect(result.transactionIsolation, command).toBe("SERIALIZABLE");
-      const authoritativePlanRows = [
-        ...(finalizedPlan?.domainMutationPlan.creates ?? []),
-        ...(finalizedPlan?.domainMutationPlan.updates ?? []),
-        ...(finalizedPlan?.domainMutationPlan.supersedes ?? []),
-        ...(finalizedPlan?.domainMutationPlan.mappings ?? []),
-      ];
-      expect(
-        authoritativePlanRows.filter(
-          (row) =>
-            "commandType" in row.completeTypedValues || "commandPayload" in row.completeTypedValues,
-        ),
-        `${command}:generic-plan-fallback`,
-      ).toEqual([]);
-      await expect(
-        new PostgresManualResolutionAdapter(pool, { schema }).execute(prepared.input),
-      ).resolves.toEqual(result);
-      expect(
-        Number(
-          (
-            await pool.query<{ count: string }>(
-              `SELECT count(*) FROM ${schema}.manual_resolution_commands WHERE id=$1`,
-              [prepared.input.commandId],
+  it.each([
+    { name: "1-6", commandBatch: commands.slice(0, 6) },
+    { name: "7-12", commandBatch: commands.slice(6) },
+  ])(
+    "routes approved M02 command batch $name through durable records, audit, and restart replay",
+    async ({ commandBatch }) => {
+      const pool = await harness.start();
+      for (const [index, command] of commandBatch.entries()) {
+        const schema = `m02_all_${String(index)}`;
+        await migrateSchema(pool, schema);
+        const prepared = ["MARK_FORK", "MARK_MIRROR", "MARK_DUPLICATE"].includes(command)
+          ? prepareCorrection(
+              command as "MARK_FORK" | "MARK_MIRROR" | "MARK_DUPLICATE",
+              1_000 + index,
             )
-          ).rows[0]?.count,
-        ),
-        command,
-      ).toBe(1);
-      expect(
-        Number(
-          (await pool.query<{ count: string }>(`SELECT count(*) FROM ${schema}.m02_audit_events`))
-            .rows[0]?.count,
-        ),
-        command,
-      ).toBeGreaterThan(1);
-      const persistedAudits = await pool.query<{
-        action: string;
-        id: string;
-        subject_id: string;
-        subject_type: string;
-      }>(
-        `SELECT id,action,subject_type,subject_id
-         FROM ${schema}.m02_audit_events
-         WHERE command_id=$1
-         ORDER BY convert_to(id,'UTF8')`,
-        [prepared.input.commandId],
-      );
-      expect(
-        [...(finalizedPlan?.domainMutationPlan.audits ?? [])]
-          .map(({ id, action, subjectType, subjectId }) => ({
-            id,
-            action,
-            subject_type: subjectType,
-            subject_id: subjectId,
-          }))
-          .sort((left, right) => Buffer.compare(Buffer.from(left.id), Buffer.from(right.id))),
-        `${command}:audit-plan-equality`,
-      ).toEqual(persistedAudits.rows);
-      const typedPlanRows = authoritativePlanRows.filter(
-        (row, rowIndex, rows) =>
-          rows.findIndex(
-            (candidate) => candidate.table === row.table && candidate.id === row.id,
-          ) === rowIndex,
-      );
-      for (const intent of typedPlanRows) {
-        const persisted = (
-          await pool.query<{ value: Record<string, unknown> }>(
-            `SELECT to_jsonb(row) AS value FROM ${schema}.${intent.table} row WHERE id=$1`,
-            [intent.id],
-          )
-        ).rows[0]?.value;
-        expect(
-          normalizeDatabaseValue(persisted),
-          `${command}:${intent.table}:${intent.id}:complete-plan-equality`,
-        ).toEqual(normalizeDatabaseValue(intent.completeTypedValues));
-      }
-      const persistedResult = (
-        await pool.query<{ value: Record<string, unknown> }>(
-          `SELECT to_jsonb(row) AS value FROM ${schema}.m02_manual_command_results row
-           WHERE command_id=$1`,
-          [prepared.input.commandId],
-        )
-      ).rows[0]?.value;
-      expect(
-        normalizeDatabaseValue(persistedResult),
-        `${command}:typed-result-plan-equality`,
-      ).toEqual(
-        normalizeDatabaseValue({
-          ...finalizedPlan?.domainMutationPlan.result.completeTypedValues,
-          mutation_plan_fingerprint: finalizedPlan?.fingerprint,
-        }),
-      );
-      expect(
-        Number(
-          (
-            await pool.query<{ count: string }>(
-              `SELECT count(*) FROM ${schema}.m02_command_domain_records`,
-            )
-          ).rows[0]?.count,
-        ),
-        command,
-      ).toBe(0);
-      const storedExpectations = await pool.query<{ key: string }>(
-        `SELECT jsonb_object_keys(expected_versions) AS key
-         FROM ${schema}.manual_resolution_commands`,
-      );
-      expect(
-        storedExpectations.rows
-          .map(({ key }) => key)
-          .filter((key) => !key.startsWith("guard:"))
-          .every((key) => key.startsWith("row:")),
-        `${command} caller expectations must contain only canonical typed row keys`,
-      ).toBe(true);
-      if (["SPLIT_ROOTS", "MERGE_ROOTS", "OVERRIDE_NON_SKILL"].includes(command)) {
-        expect(prepared.input.expectedVersions, `${command}:typed-job-expectations`).toMatchObject({
-          "row:acquisition_jobs:job-1": 1,
-          "row:m02_jobs:job-1": 1,
-        });
-        expect(
-          finalizedPlan?.domainMutationPlan.updates
-            .filter((row) => ["acquisition_jobs", "m02_jobs"].includes(row.table))
-            .map((row) => row.table)
-            .sort(),
-          `${command}:typed-job-plan`,
-        ).toEqual(["acquisition_jobs", "m02_jobs"]);
-        const topologyTables = new Set([
-          "repository_candidate_groups",
-          "repository_classification_runs",
-          "candidate_roots",
-          "repository_candidate_root_order",
-          "resource_candidates",
-          "repository_group_relationships",
-          "m02_review_states",
-          "candidate_root_ownership",
-          "m02_root_replacements",
-          "m02_candidate_replacements",
-          "m02_ownership_replacements",
-          "m02_group_edge_replacements",
-          "acquisition_jobs",
-          "m02_jobs",
-        ]);
-        const topologyIntents = [
+          : prepareCommand(command, 1_000 + index);
+        try {
+          await persistPreparedCommand(pool, schema, prepared, "ALL_COMMAND");
+        } catch (error) {
+          throw new Error(`${command} discovery: ${(error as Error).message}`, { cause: error });
+        }
+        let result;
+        let finalizedPlan: CommandMutationPlanV1 | undefined;
+        try {
+          result = await new PostgresManualResolutionAdapter(
+            harness.poolForRole("ai_ark_m01_m02_login"),
+            {
+              schema,
+              onPlanFinalized: (plan) => {
+                finalizedPlan = plan;
+              },
+              peerLoginRole: "ai_ark_m04_login",
+            },
+          ).execute(prepared.input);
+        } catch (error) {
+          throw new Error(`${command}: ${(error as Error).message}`, { cause: error });
+        }
+        expect(result.transactionIsolation, command).toBe("SERIALIZABLE");
+        const authoritativePlanRows = [
           ...(finalizedPlan?.domainMutationPlan.creates ?? []),
           ...(finalizedPlan?.domainMutationPlan.updates ?? []),
           ...(finalizedPlan?.domainMutationPlan.supersedes ?? []),
           ...(finalizedPlan?.domainMutationPlan.mappings ?? []),
-        ].filter(
+        ];
+        expect(
+          authoritativePlanRows.filter(
+            (row) =>
+              "commandType" in row.completeTypedValues ||
+              "commandPayload" in row.completeTypedValues,
+          ),
+          `${command}:generic-plan-fallback`,
+        ).toEqual([]);
+        await expect(
+          new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+            schema,
+            peerLoginRole: "ai_ark_m04_login",
+          }).execute(prepared.input),
+        ).resolves.toEqual(result);
+        expect(
+          Number(
+            (
+              await pool.query<{ count: string }>(
+                `SELECT count(*) FROM ${schema}.manual_resolution_commands WHERE id=$1`,
+                [prepared.input.commandId],
+              )
+            ).rows[0]?.count,
+          ),
+          command,
+        ).toBe(1);
+        expect(
+          Number(
+            (await pool.query<{ count: string }>(`SELECT count(*) FROM ${schema}.m02_audit_events`))
+              .rows[0]?.count,
+          ),
+          command,
+        ).toBeGreaterThan(1);
+        const persistedAudits = await pool.query<{
+          action: string;
+          id: string;
+          subject_id: string;
+          subject_type: string;
+        }>(
+          `SELECT id,action,subject_type,subject_id
+         FROM ${schema}.m02_audit_events
+         WHERE command_id=$1
+         ORDER BY convert_to(id,'UTF8')`,
+          [prepared.input.commandId],
+        );
+        expect(
+          [...(finalizedPlan?.domainMutationPlan.audits ?? [])]
+            .map(({ id, action, subjectType, subjectId }) => ({
+              id,
+              action,
+              subject_type: subjectType,
+              subject_id: subjectId,
+            }))
+            .sort((left, right) => Buffer.compare(Buffer.from(left.id), Buffer.from(right.id))),
+          `${command}:audit-plan-equality`,
+        ).toEqual(persistedAudits.rows);
+        const typedPlanRows = authoritativePlanRows.filter(
           (row, rowIndex, rows) =>
-            topologyTables.has(row.table) &&
             rows.findIndex(
               (candidate) => candidate.table === row.table && candidate.id === row.id,
             ) === rowIndex,
         );
-        expect(topologyIntents.length, `${command}:topology-plan-size`).toBeGreaterThan(0);
-        for (const intent of topologyIntents) {
+        for (const intent of typedPlanRows) {
           const persisted = (
             await pool.query<{ value: Record<string, unknown> }>(
               `SELECT to_jsonb(row) AS value FROM ${schema}.${intent.table} row WHERE id=$1`,
@@ -3304,135 +3722,228 @@ describe("M02 durable PostgreSQL command adapter", () => {
           ).rows[0]?.value;
           expect(
             normalizeDatabaseValue(persisted),
-            `${command}:${intent.table}:${intent.id}:plan-equality`,
+            `${command}:${intent.table}:${intent.id}:complete-plan-equality`,
           ).toEqual(normalizeDatabaseValue(intent.completeTypedValues));
         }
-        const predecessorGroup = (
-          await pool.query<{
-            state: string;
-            superseded_by_group_id: string;
-            source_snapshot_id: string;
-            classification_policy_version: string;
-            identity_policy_version: string;
-          }>(
-            `SELECT state,superseded_by_group_id,source_snapshot_id,
-                    classification_policy_version,identity_policy_version
-             FROM ${schema}.repository_candidate_groups WHERE id='group-1'`,
-          )
-        ).rows[0];
-        expect(predecessorGroup, command).toMatchObject({
-          state: "SUPERSEDED",
-          source_snapshot_id: "snapshot-1",
-          classification_policy_version: "classification-v1",
-          identity_policy_version: "identity-v1",
-        });
-        expect(predecessorGroup?.superseded_by_group_id, command).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-        );
-        expect(predecessorGroup?.superseded_by_group_id, command).not.toBe(
-          prepared.input.payload.replacementGroupId,
-        );
-        const replacementGroupId = predecessorGroup?.superseded_by_group_id ?? "";
-        const provisionalTopologyIds = new Set([
-          ...(prepared.input.payload.replacementRootIds ?? "").split(",").filter(Boolean),
-          ...(prepared.input.payload.replacementCandidateIds ?? "").split(",").filter(Boolean),
-        ]);
-        const allocatedTopologyRows = [...(finalizedPlan?.domainMutationPlan.creates ?? [])].filter(
-          (row) => ["candidate_roots", "resource_candidates"].includes(row.table),
-        );
-        expect(
-          allocatedTopologyRows.length,
-          `${command}:plural-topology-allocation`,
-        ).toBeGreaterThan(0);
-        for (const row of allocatedTopologyRows) {
-          expect(row.id, `${command}:${row.table}:server-id`).toMatch(UUID_PATTERN);
-          expect(
-            provisionalTopologyIds.has(row.id),
-            `${command}:${row.table}:no-provisional-id`,
-          ).toBe(false);
-        }
-        const committedResultId = (
-          await pool.query<{ id: string }>(
-            `SELECT id FROM ${schema}.m02_manual_command_results WHERE command_id=$1`,
+        const persistedResult = (
+          await pool.query<{ value: Record<string, unknown> }>(
+            `SELECT to_jsonb(row) AS value FROM ${schema}.m02_manual_command_results row
+           WHERE command_id=$1`,
             [prepared.input.commandId],
           )
-        ).rows[0]?.id;
-        expect(committedResultId, `${command}:committed-result-id`).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ).rows[0]?.value;
+        expect(
+          normalizeDatabaseValue(persistedResult),
+          `${command}:typed-result-plan-equality`,
+        ).toEqual(
+          normalizeDatabaseValue({
+            ...finalizedPlan?.domainMutationPlan.result.completeTypedValues,
+            mutation_plan_fingerprint: finalizedPlan?.fingerprint,
+          }),
         );
-        expect(
-          (
-            await pool.query<{
-              state: string;
-              supersedes_group_id: string;
-              replacement_command_id: string;
-              replacement_result_id: string;
-              replacement_audit_event_id: string;
-            }>(
-              `SELECT state,supersedes_group_id,replacement_command_id,
-                      replacement_result_id,replacement_audit_event_id
-               FROM ${schema}.repository_candidate_groups WHERE id=$1`,
-              [replacementGroupId],
-            )
-          ).rows[0],
-          `${command}:successor-group-provenance`,
-        ).toMatchObject({
-          state: "ACTIVE",
-          supersedes_group_id: "group-1",
-          replacement_command_id: prepared.input.commandId,
-          replacement_result_id: committedResultId,
-        });
-        expect(
-          (
-            await pool.query<{
-              normalized_root_path: string;
-              candidate_root_fingerprint: string;
-              candidate_content_fingerprint: string;
-              source_snapshot_id: string;
-            }>(
-              `SELECT normalized_root_path,candidate_root_fingerprint,
-                      candidate_content_fingerprint,source_snapshot_id
-               FROM ${schema}.candidate_roots WHERE id='root-1'`,
-            )
-          ).rows[0],
-          `${command}:immutable-predecessor-root`,
-        ).toEqual({
-          normalized_root_path: command === "OVERRIDE_NON_SKILL" ? "skills/new" : ".",
-          candidate_root_fingerprint: "b".repeat(64),
-          candidate_content_fingerprint: "a".repeat(64),
-          source_snapshot_id: "snapshot-1",
-        });
-        for (const table of [
-          "m02_root_replacements",
-          "m02_candidate_replacements",
-          "m02_ownership_replacements",
-          "m02_group_edge_replacements",
-        ])
-          expect(
-            Number(
-              (await pool.query<{ count: string }>(`SELECT count(*) FROM ${schema}.${table}`))
-                .rows[0]?.count,
-            ),
-            `${command}:${table}`,
-          ).toBeGreaterThan(0);
         expect(
           Number(
             (
               await pool.query<{ count: string }>(
-                `SELECT count(*) FROM ${schema}.candidate_root_ownership ownership
-                 JOIN ${schema}.candidate_roots root ON root.id=ownership.candidate_root_id
-                 WHERE root.group_id=$1`,
-                [replacementGroupId],
+                `SELECT count(*) FROM ${schema}.m02_command_domain_records`,
               )
             ).rows[0]?.count,
           ),
           command,
-        ).toBe(JSON.parse(prepared.input.payload.replacementOwnershipJson ?? "[]").length);
+        ).toBe(0);
+        const storedExpectations = await pool.query<{ key: string }>(
+          `SELECT jsonb_object_keys(expected_versions) AS key
+         FROM ${schema}.manual_resolution_commands`,
+        );
         expect(
-          Number(
+          storedExpectations.rows
+            .map(({ key }) => key)
+            .filter((key) => !key.startsWith("guard:"))
+            .every((key) => key.startsWith("row:")),
+          `${command} caller expectations must contain only canonical typed row keys`,
+        ).toBe(true);
+        if (["SPLIT_ROOTS", "MERGE_ROOTS", "OVERRIDE_NON_SKILL"].includes(command)) {
+          expect(
+            prepared.input.expectedVersions,
+            `${command}:typed-job-expectations`,
+          ).toMatchObject({
+            "row:acquisition_jobs:job-1": 1,
+            "row:m02_jobs:job-1": 1,
+          });
+          expect(
+            finalizedPlan?.domainMutationPlan.updates
+              .filter((row) => ["acquisition_jobs", "m02_jobs"].includes(row.table))
+              .map((row) => row.table)
+              .sort(),
+            `${command}:typed-job-plan`,
+          ).toEqual(["acquisition_jobs", "m02_jobs"]);
+          const topologyTables = new Set([
+            "repository_candidate_groups",
+            "repository_classification_runs",
+            "candidate_roots",
+            "repository_candidate_root_order",
+            "resource_candidates",
+            "repository_group_relationships",
+            "m02_review_states",
+            "candidate_root_ownership",
+            "m02_root_replacements",
+            "m02_candidate_replacements",
+            "m02_ownership_replacements",
+            "m02_group_edge_replacements",
+            "acquisition_jobs",
+            "m02_jobs",
+          ]);
+          const topologyIntents = [
+            ...(finalizedPlan?.domainMutationPlan.creates ?? []),
+            ...(finalizedPlan?.domainMutationPlan.updates ?? []),
+            ...(finalizedPlan?.domainMutationPlan.supersedes ?? []),
+            ...(finalizedPlan?.domainMutationPlan.mappings ?? []),
+          ].filter(
+            (row, rowIndex, rows) =>
+              topologyTables.has(row.table) &&
+              rows.findIndex(
+                (candidate) => candidate.table === row.table && candidate.id === row.id,
+              ) === rowIndex,
+          );
+          expect(topologyIntents.length, `${command}:topology-plan-size`).toBeGreaterThan(0);
+          for (const intent of topologyIntents) {
+            const persisted = (
+              await pool.query<{ value: Record<string, unknown> }>(
+                `SELECT to_jsonb(row) AS value FROM ${schema}.${intent.table} row WHERE id=$1`,
+                [intent.id],
+              )
+            ).rows[0]?.value;
+            expect(
+              normalizeDatabaseValue(persisted),
+              `${command}:${intent.table}:${intent.id}:plan-equality`,
+            ).toEqual(normalizeDatabaseValue(intent.completeTypedValues));
+          }
+          const predecessorGroup = (
+            await pool.query<{
+              state: string;
+              superseded_by_group_id: string;
+              source_snapshot_id: string;
+              classification_policy_version: string;
+              identity_policy_version: string;
+            }>(
+              `SELECT state,superseded_by_group_id,source_snapshot_id,
+                    classification_policy_version,identity_policy_version
+             FROM ${schema}.repository_candidate_groups WHERE id='group-1'`,
+            )
+          ).rows[0];
+          expect(predecessorGroup, command).toMatchObject({
+            state: "SUPERSEDED",
+            source_snapshot_id: "snapshot-1",
+            classification_policy_version: "classification-v1",
+            identity_policy_version: "identity-v1",
+          });
+          expect(predecessorGroup?.superseded_by_group_id, command).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+          );
+          expect(predecessorGroup?.superseded_by_group_id, command).not.toBe(
+            prepared.input.payload.replacementGroupId,
+          );
+          const replacementGroupId = predecessorGroup?.superseded_by_group_id ?? "";
+          const provisionalTopologyIds = new Set([
+            ...(prepared.input.payload.replacementRootIds ?? "").split(",").filter(Boolean),
+            ...(prepared.input.payload.replacementCandidateIds ?? "").split(",").filter(Boolean),
+          ]);
+          const allocatedTopologyRows = [
+            ...(finalizedPlan?.domainMutationPlan.creates ?? []),
+          ].filter((row) => ["candidate_roots", "resource_candidates"].includes(row.table));
+          expect(
+            allocatedTopologyRows.length,
+            `${command}:plural-topology-allocation`,
+          ).toBeGreaterThan(0);
+          for (const row of allocatedTopologyRows) {
+            expect(row.id, `${command}:${row.table}:server-id`).toMatch(UUID_PATTERN);
+            expect(
+              provisionalTopologyIds.has(row.id),
+              `${command}:${row.table}:no-provisional-id`,
+            ).toBe(false);
+          }
+          const committedResultId = (
+            await pool.query<{ id: string }>(
+              `SELECT id FROM ${schema}.m02_manual_command_results WHERE command_id=$1`,
+              [prepared.input.commandId],
+            )
+          ).rows[0]?.id;
+          expect(committedResultId, `${command}:committed-result-id`).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+          );
+          expect(
             (
-              await pool.query<{ count: string }>(
-                `SELECT count(DISTINCT successor.id)
+              await pool.query<{
+                state: string;
+                supersedes_group_id: string;
+                replacement_command_id: string;
+                replacement_result_id: string;
+                replacement_audit_event_id: string;
+              }>(
+                `SELECT state,supersedes_group_id,replacement_command_id,
+                      replacement_result_id,replacement_audit_event_id
+               FROM ${schema}.repository_candidate_groups WHERE id=$1`,
+                [replacementGroupId],
+              )
+            ).rows[0],
+            `${command}:successor-group-provenance`,
+          ).toMatchObject({
+            state: "ACTIVE",
+            supersedes_group_id: "group-1",
+            replacement_command_id: prepared.input.commandId,
+            replacement_result_id: committedResultId,
+          });
+          expect(
+            (
+              await pool.query<{
+                normalized_root_path: string;
+                candidate_root_fingerprint: string;
+                candidate_content_fingerprint: string;
+                source_snapshot_id: string;
+              }>(
+                `SELECT normalized_root_path,candidate_root_fingerprint,
+                      candidate_content_fingerprint,source_snapshot_id
+               FROM ${schema}.candidate_roots WHERE id='root-1'`,
+              )
+            ).rows[0],
+            `${command}:immutable-predecessor-root`,
+          ).toEqual({
+            normalized_root_path: command === "OVERRIDE_NON_SKILL" ? "skills/new" : ".",
+            candidate_root_fingerprint: "b".repeat(64),
+            candidate_content_fingerprint: "a".repeat(64),
+            source_snapshot_id: "snapshot-1",
+          });
+          for (const table of [
+            "m02_root_replacements",
+            "m02_candidate_replacements",
+            "m02_ownership_replacements",
+            "m02_group_edge_replacements",
+          ])
+            expect(
+              Number(
+                (await pool.query<{ count: string }>(`SELECT count(*) FROM ${schema}.${table}`))
+                  .rows[0]?.count,
+              ),
+              `${command}:${table}`,
+            ).toBeGreaterThan(0);
+          expect(
+            Number(
+              (
+                await pool.query<{ count: string }>(
+                  `SELECT count(*) FROM ${schema}.candidate_root_ownership ownership
+                 JOIN ${schema}.candidate_roots root ON root.id=ownership.candidate_root_id
+                 WHERE root.group_id=$1`,
+                  [replacementGroupId],
+                )
+              ).rows[0]?.count,
+            ),
+            command,
+          ).toBe(JSON.parse(prepared.input.payload.replacementOwnershipJson ?? "[]").length);
+          expect(
+            Number(
+              (
+                await pool.query<{ count: string }>(
+                  `SELECT count(DISTINCT successor.id)
                  FROM ${schema}.m02_candidate_replacements replacement
                  JOIN ${schema}.resource_candidates successor
                    ON successor.id=replacement.successor_candidate_id
@@ -3446,16 +3957,18 @@ describe("M02 durable PostgreSQL command adapter", () => {
                    AND audit.subject_id=successor.id
                    AND audit.before_version IS NULL AND audit.before_state IS NULL
                    AND audit.after_version=1`,
-                [prepared.input.commandId, committedResultId],
-              )
-            ).rows[0]?.count,
-          ),
-          `${command}:successor-candidate-created-provenance`,
-        ).toBe(command === "SPLIT_ROOTS" ? 2 : 1);
+                  [prepared.input.commandId, committedResultId],
+                )
+              ).rows[0]?.count,
+            ),
+            `${command}:successor-candidate-created-provenance`,
+          ).toBe(command === "SPLIT_ROOTS" ? 2 : 1);
+        }
       }
-    }
-    await harness.stop();
-  }, 180_000);
+      await harness.stop();
+    },
+    180_000,
+  );
 
   it("rolls back domain, command, and accepted audit writes after a locked invariant failure", async () => {
     const pool = await harness.start();
@@ -3475,7 +3988,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
     await persistPreparedCommand(pool, schema, prepared);
     const before = await domainRecord(pool, schema, "candidate:candidate-1");
     await expect(
-      new PostgresManualResolutionAdapter(pool, { schema }).execute({
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute({
         ...prepared.input,
         evidenceIds: ["evidence-missing"],
         payload: { ...prepared.input.payload, reliableTokenEvidenceId: "evidence-missing" },
@@ -3561,7 +4077,7 @@ describe("M02 durable PostgreSQL command adapter", () => {
     const reviewCase = { ...reviewPrepared, input: reviewInput };
     await persistPreparedCommand(pool, reviewSchema, reviewCase, "ALL_COMMAND");
     await expect(
-      new PostgresManualResolutionAdapter(pool, {
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema: reviewSchema,
         onAttemptOpened: async () => {
           await pool.query(
@@ -3569,6 +4085,7 @@ describe("M02 durable PostgreSQL command adapter", () => {
              SET record_version=record_version+1 WHERE id='review-1'`,
           );
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(reviewInput),
     ).rejects.toMatchObject({ code: "MUTATION_PLAN_CHANGED" });
     expect(
@@ -3586,7 +4103,7 @@ describe("M02 durable PostgreSQL command adapter", () => {
     const replacementPrepared = prepareCommand("REPLACE_M02_JOB", 1_151);
     await persistPreparedCommand(pool, replacementSchema, replacementPrepared);
     await expect(
-      new PostgresManualResolutionAdapter(pool, {
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema: replacementSchema,
         onAttemptOpened: async () => {
           await pool.query(
@@ -3594,6 +4111,7 @@ describe("M02 durable PostgreSQL command adapter", () => {
              SET record_version=record_version+1 WHERE id='job-source'`,
           );
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(replacementPrepared.input),
     ).rejects.toMatchObject({ code: "MUTATION_PLAN_CHANGED" });
     expect(
@@ -3622,7 +4140,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
     input.expectedVersions = {};
 
     await expect(
-      new PostgresManualResolutionAdapter(pool, { schema }).execute(input),
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute(input),
     ).rejects.toMatchObject({ code: "EXPECTED_VERSION_SET_INVALID" });
     expect(
       (
@@ -3661,12 +4182,16 @@ describe("M02 durable PostgreSQL command adapter", () => {
     };
     await persistPreparedCommand(pool, schema, { ...prepared, input, keys: [] }, "ALL_COMMAND");
     let finalizedPlan: CommandMutationPlanV1 | undefined;
-    const result = await new PostgresManualResolutionAdapter(pool, {
-      schema,
-      onPlanFinalized: (plan) => {
-        finalizedPlan = plan;
+    const result = await new PostgresManualResolutionAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      {
+        schema,
+        onPlanFinalized: (plan) => {
+          finalizedPlan = plan;
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    }).execute(input);
+    ).execute(input);
     expect(result).toMatchObject({ transactionIsolation: "SERIALIZABLE" });
     const handoff = await domainRecord(pool, schema, "handoff:candidate-1");
     expect(handoff).toMatchObject({ state: "ACTIVE" });
@@ -3716,13 +4241,20 @@ describe("M02 durable PostgreSQL command adapter", () => {
       expectedVersions: {} as Record<string, number | null>,
     };
     competing.expectedVersions = {
-      ...(await new PostgresManualResolutionAdapter(pool, {
+      ...(await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema,
+        peerLoginRole: "ai_ark_m04_login",
       }).discoverRequiredCurrentExpectations(competing)),
     };
     const outcomes = await Promise.allSettled([
-      new PostgresManualResolutionAdapter(pool, { schema }).execute(prepared.input),
-      new PostgresManualResolutionAdapter(pool, { schema }).execute(competing),
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute(prepared.input),
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute(competing),
     ]);
     expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter(({ status }) => status === "rejected")).toHaveLength(1);
@@ -3790,7 +4322,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
       },
       expectedVersions: {},
     };
-    const adapter = new PostgresManualResolutionAdapter(pool, { schema });
+    const adapter = new PostgresManualResolutionAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      { schema, peerLoginRole: "ai_ark_m04_login" },
+    );
     const input = {
       ...provisional,
       expectedVersions: { ...(await adapter.discoverRequiredCurrentExpectations(provisional)) },
@@ -3832,17 +4367,19 @@ describe("M02 durable PostgreSQL command adapter", () => {
       expectedVersions: {} as Record<string, number | null>,
     };
     failedInput.expectedVersions = {
-      ...(await new PostgresManualResolutionAdapter(pool, {
+      ...(await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema,
+        peerLoginRole: "ai_ark_m04_login",
       }).discoverRequiredCurrentExpectations(failedInput)),
     };
     let finalizedPlan: CommandMutationPlanV1 | undefined;
     await expect(
-      new PostgresManualResolutionAdapter(pool, {
+      new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema,
         onPlanFinalized: (plan) => {
           finalizedPlan = plan;
         },
+        peerLoginRole: "ai_ark_m04_login",
       }).execute(failedInput),
     ).resolves.toMatchObject({ transactionIsolation: "SERIALIZABLE" });
     for (const key of ["job:job-source", "job:job-overlap"])
@@ -3902,12 +4439,16 @@ describe("M02 durable PostgreSQL command adapter", () => {
       let finalizedPlan: CommandMutationPlanV1 | undefined;
       let correctionResult;
       try {
-        correctionResult = await new PostgresManualResolutionAdapter(pool, {
-          schema,
-          onPlanFinalized: (plan) => {
-            finalizedPlan = plan;
+        correctionResult = await new PostgresManualResolutionAdapter(
+          harness.poolForRole("ai_ark_m01_m02_login"),
+          {
+            schema,
+            onPlanFinalized: (plan) => {
+              finalizedPlan = plan;
+            },
+            peerLoginRole: "ai_ark_m04_login",
           },
-        }).execute(prepared.input);
+        ).execute(prepared.input);
       } catch (error) {
         throw new Error(`${command}: ${(error as Error).message}`, { cause: error });
       }
@@ -4014,13 +4555,22 @@ describe("M02 durable PostgreSQL command adapter", () => {
           mode,
           1_600 + index,
         ));
-        await new PostgresManualResolutionAdapter(transactionPool, {
-          schema,
-          onPlanFinalized: (plan) => {
-            finalizedPlan = plan;
-          },
-        }).execute(input);
         await client.query("COMMIT");
+        const writerAdapter = new PostgresManualResolutionAdapter(
+          harness.poolForRole("ai_ark_m01_m02_login"),
+          {
+            schema,
+            onPlanFinalized: (plan) => {
+              finalizedPlan = plan;
+            },
+            peerLoginRole: "ai_ark_m04_login",
+          },
+        );
+        input = {
+          ...input,
+          expectedVersions: { ...(await writerAdapter.discoverRequiredCurrentExpectations(input)) },
+        };
+        await writerAdapter.execute(input);
       } catch (error) {
         await client.query("ROLLBACK");
         throw new Error(`${command}: ${(error as Error).message}`, { cause: error });
@@ -4062,11 +4612,12 @@ describe("M02 durable PostgreSQL command adapter", () => {
     const a1 = prepareCommand("ATTACH_NEW_VERSION", 1_799);
     await persistPreparedCommand(pool, a1Schema, a1, "ALL_COMMAND");
     let a1Plan: CommandMutationPlanV1 | undefined;
-    await new PostgresManualResolutionAdapter(pool, {
+    await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
       schema: a1Schema,
       onPlanFinalized: (plan) => {
         a1Plan = plan;
       },
+      peerLoginRole: "ai_ark_m04_login",
     }).execute(a1.input);
     const a1VersionIntent = a1Plan?.domainMutationPlan.creates.find(
       (row) => row.table === "resource_version_identities",
@@ -4088,11 +4639,12 @@ describe("M02 durable PostgreSQL command adapter", () => {
     a2.input.payload = { ...a2.input.payload, contentFingerprint: "a".repeat(64) };
     await persistPreparedCommand(pool, schema, a2, "ALL_COMMAND");
     let a2Plan: CommandMutationPlanV1 | undefined;
-    await new PostgresManualResolutionAdapter(pool, {
+    await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
       schema,
       onPlanFinalized: (plan) => {
         a2Plan = plan;
       },
+      peerLoginRole: "ai_ark_m04_login",
     }).execute(a2.input);
     expect(
       a2Plan?.domainMutationPlan.creates.some(
@@ -4167,9 +4719,13 @@ describe("M02 durable PostgreSQL command adapter", () => {
     await pool.query(
       `DELETE FROM ${missingLinkSchema}.resource_source_links WHERE id='source-link-active'`,
     );
-    const missingLinkAdapter = new PostgresManualResolutionAdapter(pool, {
-      schema: missingLinkSchema,
-    });
+    const missingLinkAdapter = new PostgresManualResolutionAdapter(
+      harness.poolForRole("ai_ark_m01_m02_login"),
+      {
+        schema: missingLinkSchema,
+        peerLoginRole: "ai_ark_m04_login",
+      },
+    );
     missingLink.input.expectedVersions = {
       ...(await missingLinkAdapter.discoverRequiredCurrentExpectations(missingLink.input)),
     };
@@ -4194,9 +4750,13 @@ describe("M02 durable PostgreSQL command adapter", () => {
           activeSourceLinkId: "source-link-not-the-prior-delivery",
         },
       };
-      const authorityAdapter = new PostgresManualResolutionAdapter(pool, {
-        schema: a1AuthoritySchema,
-      });
+      const authorityAdapter = new PostgresManualResolutionAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        {
+          schema: a1AuthoritySchema,
+          peerLoginRole: "ai_ark_m04_login",
+        },
+      );
       const invalidWithExpectations = {
         ...invalidInput,
         expectedVersions: {
@@ -4257,16 +4817,18 @@ describe("M02 durable PostgreSQL command adapter", () => {
     );
     a3.input.payload = { ...a3.input.payload, activeSourceLinkId: "exact-link-a3" };
     a3.input.expectedVersions = {
-      ...(await new PostgresManualResolutionAdapter(pool, {
+      ...(await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
         schema: a3Schema,
+        peerLoginRole: "ai_ark_m04_login",
       }).discoverRequiredCurrentExpectations(a3.input)),
     };
     let a3Plan: CommandMutationPlanV1 | undefined;
-    await new PostgresManualResolutionAdapter(pool, {
+    await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
       schema: a3Schema,
       onPlanFinalized: (plan) => {
         a3Plan = plan;
       },
+      peerLoginRole: "ai_ark_m04_login",
     }).execute(a3.input);
     expect(
       a3Plan?.domainMutationPlan.creates.some((row) =>
@@ -4348,7 +4910,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
               jobId: "job-1",
             },
           });
-          const rejectionAdapter = new PostgresManualResolutionAdapter(pool, { schema });
+          const rejectionAdapter = new PostgresManualResolutionAdapter(
+            harness.poolForRole("ai_ark_m01_m02_login"),
+            { schema, peerLoginRole: "ai_ark_m04_login" },
+          );
           const rejection = {
             ...provisionalRejection,
             expectedVersions: {
@@ -4398,12 +4963,16 @@ describe("M02 durable PostgreSQL command adapter", () => {
           auditId: `audit-${targetType.toLowerCase()}-${historical ? "t1" : "t0"}`,
         };
         let finalizedPlan: CommandMutationPlanV1 | undefined;
-        const adapter = new PostgresManualResolutionAdapter(pool, {
-          schema,
-          onPlanFinalized: (plan) => {
-            finalizedPlan = plan;
+        const adapter = new PostgresManualResolutionAdapter(
+          harness.poolForRole("ai_ark_m01_m02_login"),
+          {
+            schema,
+            onPlanFinalized: (plan) => {
+              finalizedPlan = plan;
+            },
+            peerLoginRole: "ai_ark_m04_login",
           },
-        });
+        );
         provisional.expectedVersions = {
           ...(await adapter.discoverRequiredCurrentExpectations(provisional)),
         };
@@ -4474,7 +5043,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
             ? prepareCorrection("MARK_FORK", 2_300 + familyIndex)
             : prepareCommand(command, 2_300 + familyIndex);
         await persistPreparedCommand(pool, schema, prepared, "ALL_COMMAND");
-        await new PostgresManualResolutionAdapter(pool, { schema }).execute(prepared.input);
+        await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+          schema,
+          peerLoginRole: "ai_ark_m04_login",
+        }).execute(prepared.input);
         const commandRow = (
           await pool.query<{
             expected_versions: Record<string, number | null>;
@@ -4600,7 +5172,10 @@ describe("M02 durable PostgreSQL command adapter", () => {
         auditId: `audit-open-${String(index)}`,
         jobId: command === "REPLACE_M02_JOB" ? "job-source" : "job-1",
       };
-      const requestAdapter = new PostgresManualResolutionAdapter(pool, { schema });
+      const requestAdapter = new PostgresManualResolutionAdapter(
+        harness.poolForRole("ai_ark_m01_m02_login"),
+        { schema, peerLoginRole: "ai_ark_m04_login" },
+      );
       provisionalRequest.expectedVersions = {
         ...(await requestAdapter.discoverRequiredCurrentExpectations(provisionalRequest)),
       };
@@ -4644,11 +5219,18 @@ describe("M02 durable PostgreSQL command adapter", () => {
         await persistPreparedCommand(pool, schema, prepared, "ALL_COMMAND");
       else
         prepared.input.expectedVersions = {
-          ...(await new PostgresManualResolutionAdapter(pool, {
-            schema,
-          }).discoverRequiredCurrentExpectations(prepared.input)),
+          ...(await new PostgresManualResolutionAdapter(
+            harness.poolForRole("ai_ark_m01_m02_login"),
+            {
+              schema,
+              peerLoginRole: "ai_ark_m04_login",
+            },
+          ).discoverRequiredCurrentExpectations(prepared.input)),
         };
-      await new PostgresManualResolutionAdapter(pool, { schema }).execute(prepared.input);
+      await new PostgresManualResolutionAdapter(harness.poolForRole("ai_ark_m01_m02_login"), {
+        schema,
+        peerLoginRole: "ai_ark_m04_login",
+      }).execute(prepared.input);
       const clarification = (
         await pool.query<{
           state: string;
@@ -4711,45 +5293,67 @@ describe("M02 durable PostgreSQL command adapter", () => {
 
   it("bounds Serializable retries and rechecks immutable caller expectations before reopening", async () => {
     const pool = await harness.start();
-    const installFailure = async (
-      schema: string,
+    const failurePool = (
+      base: Pool,
       kind: "40001_ONCE" | "40001_ALWAYS" | "23505_ALLOWED_ONCE" | "23505_OTHER_ALWAYS",
-    ) => {
-      await pool.query(`CREATE SEQUENCE ${schema}.injected_failure_sequence`);
-      await pool.query(`
-        CREATE FUNCTION ${schema}.inject_command_failure() RETURNS trigger LANGUAGE plpgsql AS $$
-        DECLARE invocation bigint;
-        BEGIN
-          invocation := nextval('${schema}.injected_failure_sequence');
-          IF '${kind}' = '40001_ALWAYS' OR ('${kind}' = '40001_ONCE' AND invocation = 1) THEN
-            RAISE EXCEPTION USING ERRCODE='40001', MESSAGE='injected serialization failure';
-          END IF;
-          IF '${kind}' = '23505_OTHER_ALWAYS' THEN
-            RAISE EXCEPTION USING ERRCODE='23505', CONSTRAINT='unrelated_unique', MESSAGE='injected unrelated unique failure';
-          END IF;
-          IF '${kind}' = '23505_ALLOWED_ONCE' AND invocation = 1 THEN
-            RAISE EXCEPTION USING ERRCODE='23505', CONSTRAINT='m02_concurrency_guards_pkey', MESSAGE='injected approved first-use race';
-          END IF;
-          RETURN NEW;
-        END;
-        $$`);
-      await pool.query(`
-        CREATE TRIGGER inject_command_failure
-        BEFORE INSERT ON ${schema}.manual_resolution_commands
-        FOR EACH ROW EXECUTE FUNCTION ${schema}.inject_command_failure()`);
+    ): Pool => {
+      let invocations = 0;
+      return {
+        connect: async () => {
+          const client = await base.connect();
+          return new Proxy(client, {
+            get(target, property) {
+              if (property === "query")
+                return (...args: unknown[]) => {
+                  const sql = args[0];
+                  if (
+                    typeof sql === "string" &&
+                    /^\s*INSERT INTO manual_resolution_commands\s*\(/u.test(sql)
+                  ) {
+                    invocations += 1;
+                    const serialization =
+                      kind === "40001_ALWAYS" || (kind === "40001_ONCE" && invocations === 1);
+                    const approvedUnique = kind === "23505_ALLOWED_ONCE" && invocations === 1;
+                    const otherUnique = kind === "23505_OTHER_ALWAYS";
+                    if (serialization || approvedUnique || otherUnique)
+                      return Promise.reject(
+                        Object.assign(new Error("synthetic command insert failure"), {
+                          code: serialization ? "40001" : "23505",
+                          ...(approvedUnique || otherUnique
+                            ? {
+                                constraint: approvedUnique
+                                  ? "m02_concurrency_guards_pkey"
+                                  : "unrelated_unique",
+                              }
+                            : {}),
+                        }),
+                      );
+                  }
+                  const query = Reflect.get(target, "query", target) as (
+                    ...queryArgs: unknown[]
+                  ) => Promise<unknown>;
+                  return query.apply(target, args);
+                };
+              const value = Reflect.get(target, property, target) as unknown;
+              return typeof value === "function" ? (value.bind(target) as unknown) : value;
+            },
+          });
+        },
+      } as unknown as Pool;
     };
 
     const successfulAttemptReceipts: number[][] = [];
     for (const [index, kind] of (["40001_ONCE"] as const).entries()) {
       const schema = `m02_retry_success_${String(index)}`;
-      await migrateSchema(pool, schema);
-      await persistPreparedCommand(
-        pool,
-        schema,
-        prepareCommand("REJECT_CANDIDATE", 30_000 + index),
-        "ALL_COMMAND",
-      );
-      await installFailure(schema, kind);
+      await migrateSchema(pool, schema, async () => {
+        await persistPreparedCommand(
+          pool,
+          schema,
+          prepareCommand("REJECT_CANDIDATE", 30_000 + index),
+          "ALL_COMMAND",
+          true,
+        );
+      });
       const provisional = rejectionCommand({
         commandId: `command-retry-success-${String(index)}`,
         requestId: `request-retry-success-${String(index)}`,
@@ -4761,12 +5365,16 @@ describe("M02 durable PostgreSQL command adapter", () => {
         },
       });
       const attempts: number[] = [];
-      const adapter = new PostgresManualResolutionAdapter(pool, {
-        schema,
-        onAttemptOpened: (attempt) => {
-          attempts.push(attempt);
+      const adapter = new PostgresManualResolutionAdapter(
+        failurePool(harness.poolForRole("ai_ark_m01_m02_login"), kind),
+        {
+          schema,
+          onAttemptOpened: (attempt) => {
+            attempts.push(attempt);
+          },
+          peerLoginRole: "ai_ark_m04_login",
         },
-      });
+      );
       const command = {
         ...provisional,
         expectedVersions: {
@@ -4791,14 +5399,15 @@ describe("M02 durable PostgreSQL command adapter", () => {
     }
 
     const phantomSchema = "m02_retry_phantom_first_use";
-    await migrateSchema(pool, phantomSchema);
-    await persistPreparedCommand(
-      pool,
-      phantomSchema,
-      prepareCommand("REJECT_CANDIDATE", 30_100),
-      "ALL_COMMAND",
-    );
-    await installFailure(phantomSchema, "23505_ALLOWED_ONCE");
+    await migrateSchema(pool, phantomSchema, async () => {
+      await persistPreparedCommand(
+        pool,
+        phantomSchema,
+        prepareCommand("REJECT_CANDIDATE", 30_100),
+        "ALL_COMMAND",
+        true,
+      );
+    });
     const phantomProvisional = rejectionCommand({
       commandId: "command-retry-phantom",
       requestId: "request-retry-phantom",
@@ -4810,12 +5419,16 @@ describe("M02 durable PostgreSQL command adapter", () => {
       },
     });
     const phantomAttempts: number[] = [];
-    const phantomAdapter = new PostgresManualResolutionAdapter(pool, {
-      schema: phantomSchema,
-      onAttemptOpened: (attempt) => {
-        phantomAttempts.push(attempt);
+    const phantomAdapter = new PostgresManualResolutionAdapter(
+      failurePool(harness.poolForRole("ai_ark_m01_m02_login"), "23505_ALLOWED_ONCE"),
+      {
+        schema: phantomSchema,
+        onAttemptOpened: (attempt) => {
+          phantomAttempts.push(attempt);
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    });
+    );
     const phantomCommand = {
       ...phantomProvisional,
       expectedVersions: {
@@ -4828,14 +5441,15 @@ describe("M02 durable PostgreSQL command adapter", () => {
     expect(phantomAttempts).toEqual([1]);
 
     const exhaustedSchema = "m02_retry_exhausted";
-    await migrateSchema(pool, exhaustedSchema);
-    await persistPreparedCommand(
-      pool,
-      exhaustedSchema,
-      prepareCommand("REJECT_CANDIDATE", 30_101),
-      "ALL_COMMAND",
-    );
-    await installFailure(exhaustedSchema, "40001_ALWAYS");
+    await migrateSchema(pool, exhaustedSchema, async () => {
+      await persistPreparedCommand(
+        pool,
+        exhaustedSchema,
+        prepareCommand("REJECT_CANDIDATE", 30_101),
+        "ALL_COMMAND",
+        true,
+      );
+    });
     const exhaustedProvisional = rejectionCommand({
       commandId: "command-retry-exhausted",
       requestId: "request-retry-exhausted",
@@ -4847,12 +5461,16 @@ describe("M02 durable PostgreSQL command adapter", () => {
       },
     });
     const exhaustedAttempts: number[] = [];
-    const exhaustedAdapter = new PostgresManualResolutionAdapter(pool, {
-      schema: exhaustedSchema,
-      onAttemptOpened: (attempt) => {
-        exhaustedAttempts.push(attempt);
+    const exhaustedAdapter = new PostgresManualResolutionAdapter(
+      failurePool(harness.poolForRole("ai_ark_m01_m02_login"), "40001_ALWAYS"),
+      {
+        schema: exhaustedSchema,
+        onAttemptOpened: (attempt) => {
+          exhaustedAttempts.push(attempt);
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    });
+    );
     const exhaustedCommand = {
       ...exhaustedProvisional,
       expectedVersions: {
@@ -4875,14 +5493,15 @@ describe("M02 durable PostgreSQL command adapter", () => {
     ).toBe(0);
 
     const changedSchema = "m02_retry_changed_preflight";
-    await migrateSchema(pool, changedSchema);
-    await persistPreparedCommand(
-      pool,
-      changedSchema,
-      prepareCommand("REJECT_CANDIDATE", 30_102),
-      "ALL_COMMAND",
-    );
-    await installFailure(changedSchema, "40001_ONCE");
+    await migrateSchema(pool, changedSchema, async () => {
+      await persistPreparedCommand(
+        pool,
+        changedSchema,
+        prepareCommand("REJECT_CANDIDATE", 30_102),
+        "ALL_COMMAND",
+        true,
+      );
+    });
     const changedProvisional = rejectionCommand({
       commandId: "command-retry-changed",
       requestId: "request-retry-changed",
@@ -4894,18 +5513,22 @@ describe("M02 durable PostgreSQL command adapter", () => {
       },
     });
     const changedAttempts: number[] = [];
-    const changedAdapter = new PostgresManualResolutionAdapter(pool, {
-      schema: changedSchema,
-      onAttemptOpened: (attempt) => {
-        changedAttempts.push(attempt);
-      },
-      onRetry: async () => {
-        await pool.query(
-          `UPDATE ${changedSchema}.resource_candidates
+    const changedAdapter = new PostgresManualResolutionAdapter(
+      failurePool(harness.poolForRole("ai_ark_m01_m02_login"), "40001_ONCE"),
+      {
+        schema: changedSchema,
+        onAttemptOpened: (attempt) => {
+          changedAttempts.push(attempt);
+        },
+        onRetry: async () => {
+          await pool.query(
+            `UPDATE ${changedSchema}.resource_candidates
            SET updated_at=clock_timestamp(),record_version=record_version+1 WHERE id='candidate-1'`,
-        );
+          );
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    });
+    );
     const changedCommand = {
       ...changedProvisional,
       expectedVersions: {
@@ -4920,14 +5543,15 @@ describe("M02 durable PostgreSQL command adapter", () => {
     expect(JSON.stringify(changedCommand)).toBe(immutableRequest);
 
     const unrelatedSchema = "m02_retry_unrelated_unique";
-    await migrateSchema(pool, unrelatedSchema);
-    await persistPreparedCommand(
-      pool,
-      unrelatedSchema,
-      prepareCommand("REJECT_CANDIDATE", 30_103),
-      "ALL_COMMAND",
-    );
-    await installFailure(unrelatedSchema, "23505_OTHER_ALWAYS");
+    await migrateSchema(pool, unrelatedSchema, async () => {
+      await persistPreparedCommand(
+        pool,
+        unrelatedSchema,
+        prepareCommand("REJECT_CANDIDATE", 30_103),
+        "ALL_COMMAND",
+        true,
+      );
+    });
     const unrelatedProvisional = rejectionCommand({
       commandId: "command-retry-unrelated",
       requestId: "request-retry-unrelated",
@@ -4939,12 +5563,16 @@ describe("M02 durable PostgreSQL command adapter", () => {
       },
     });
     const unrelatedAttempts: number[] = [];
-    const unrelatedAdapter = new PostgresManualResolutionAdapter(pool, {
-      schema: unrelatedSchema,
-      onAttemptOpened: (attempt) => {
-        unrelatedAttempts.push(attempt);
+    const unrelatedAdapter = new PostgresManualResolutionAdapter(
+      failurePool(harness.poolForRole("ai_ark_m01_m02_login"), "23505_OTHER_ALWAYS"),
+      {
+        schema: unrelatedSchema,
+        onAttemptOpened: (attempt) => {
+          unrelatedAttempts.push(attempt);
+        },
+        peerLoginRole: "ai_ark_m04_login",
       },
-    });
+    );
     const unrelatedCommand = {
       ...unrelatedProvisional,
       expectedVersions: {

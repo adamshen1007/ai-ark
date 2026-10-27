@@ -2,18 +2,28 @@ import { TextDecoder } from "node:util";
 
 import {
   BasicExtractionRequestV1Schema,
+  BasicExtractionRequestV2Schema,
   ExpectedPredecessorStateV1Schema,
   ExtractionCommandResultV1Schema,
+  ExtractionCommandResultV2Schema,
   ExtractionSourceReferenceV1Schema,
   ExtractionRequestV1Schema,
+  ExtractionRequestV2Schema,
   M03_FIELD_KEYS,
+  M03M02InputProjectionV1Schema,
   M03_POLICY_VERSIONS,
   StructuredExtractionBundleV1Schema,
+  StructuredExtractionBundleV2Schema,
+  fingerprintM03M02InputProjectionV1,
   type ExpectedPredecessorStateV1,
   type BasicExtractionRequestV1,
+  type BasicExtractionRequestV2,
   type ExtractionFieldResultV1,
   type ExtractionCommandResultV1,
+  type ExtractionCommandResultV2,
   type ExtractionRequestV1,
+  type ExtractionRequestV2,
+  type M03M02InputProjectionV1 as SharedM03M02InputProjectionV1,
   type M03FieldKey,
   type M03WarningCode,
   type M03AnalysisExecutionResultV1,
@@ -43,7 +53,7 @@ interface M03ByteString {
   readonly base64: string;
 }
 
-export interface M03M02InputProjectionV1 {
+interface LegacyM03M02InputProjectionV1 {
   readonly handoff: {
     readonly id: string;
     readonly resourceCandidateId: string;
@@ -210,8 +220,14 @@ export interface M03M02InputProjectionV1 {
   };
 }
 
+export type M03M02InputProjectionV1 = SharedM03M02InputProjectionV1;
+
+type ExtractionRequest = ExtractionRequestV1 | ExtractionRequestV2;
+type BasicExtractionRequest = BasicExtractionRequestV1 | BasicExtractionRequestV2;
+
 export interface M03EligibilitySnapshot {
-  readonly m02InputProjection: M03M02InputProjectionV1;
+  /** Historical V1 readers may return the frozen permissive projection; V2 validates the shared strict schema. */
+  readonly m02InputProjection: M03M02InputProjectionV1 | LegacyM03M02InputProjectionV1;
   readonly handoffExists: boolean;
   readonly handoffActive: boolean;
   readonly acquisitionCompleted: boolean;
@@ -292,18 +308,18 @@ export function fingerprintAnalysisConfiguration(input: {
   );
 }
 
-export function fingerprintExtractionRequest(request: ExtractionRequestV1): string {
+export function fingerprintExtractionRequest(request: ExtractionRequest): string {
   return sha256Hex(extractionRequestPreimage(request));
 }
 
-function extractionRequestPreimage(request: BasicExtractionRequestV1): string {
+function extractionRequestPreimage(request: BasicExtractionRequest): string {
   const { requestId: _requestId, idempotencyKey: _idempotencyKey, ...semanticRequest } = request;
   void _requestId;
   void _idempotencyKey;
   return canonicalJson(semanticRequest);
 }
 
-function safeContext(request: BasicExtractionRequestV1, phase: string) {
+function safeContext(request: BasicExtractionRequest, phase: string) {
   return {
     phase,
     requestId: request.requestId,
@@ -323,9 +339,14 @@ function safeContext(request: BasicExtractionRequestV1, phase: string) {
 }
 
 function eligibilityError(
-  request: ExtractionRequestV1,
+  request: ExtractionRequest,
   predecessor: M03EligibilitySnapshot,
 ): EligibilityError | null {
+  if (
+    request.schemaVersion === "M03_EXTRACTION_REQUEST_V2" &&
+    !M03M02InputProjectionV1Schema.safeParse(predecessor.m02InputProjection).success
+  )
+    return "M02_IDENTITY_TUPLE_INVALID";
   if (!predecessor.handoffExists) return "M02_HANDOFF_NOT_FOUND";
   if (!predecessor.handoffActive) return "M02_HANDOFF_NOT_ACTIVE";
   if (
@@ -635,17 +656,33 @@ export class InMemoryM03Orchestrator {
     return true;
   }
 
-  public async execute(
+  public async executeV1(
     rawRequestBytes: Uint8Array,
     load: () => Promise<M03LoadedInput>,
   ): Promise<ExtractionCommandResultV1> {
-    const result = await this.#executeUnchecked(rawRequestBytes, load);
+    const result = await this.#executeUnchecked(rawRequestBytes, load, "V1");
     return ExtractionCommandResultV1Schema.parse(result);
+  }
+
+  public async execute(
+    rawRequestBytes: Uint8Array,
+    load: () => Promise<M03LoadedInput>,
+  ): Promise<ExtractionCommandResultV2> {
+    const result = await this.#executeUnchecked(rawRequestBytes, load, "V2");
+    return ExtractionCommandResultV2Schema.parse(result);
+  }
+
+  public async executeV2(
+    rawRequestBytes: Uint8Array,
+    load: () => Promise<M03LoadedInput>,
+  ): Promise<ExtractionCommandResultV2> {
+    return this.execute(rawRequestBytes, load);
   }
 
   async #executeUnchecked(
     rawRequestBytes: Uint8Array,
     load: () => Promise<M03LoadedInput>,
+    version: "V1" | "V2",
   ): Promise<unknown> {
     let rawRequest: unknown;
     let duplicateKeyPaths: readonly (readonly string[])[];
@@ -661,7 +698,10 @@ export class InMemoryM03Orchestrator {
         safeContext: { phase: "REQUEST_VALIDATION" },
       };
     }
-    const basicParsed = BasicExtractionRequestV1Schema.safeParse(rawRequest);
+    const basicParsed =
+      version === "V1"
+        ? BasicExtractionRequestV1Schema.safeParse(rawRequest)
+        : BasicExtractionRequestV2Schema.safeParse(rawRequest);
     if (
       !basicParsed.success ||
       duplicateKeyPaths.some(([first]) => first !== "expectedPredecessorState")
@@ -739,10 +779,16 @@ export class InMemoryM03Orchestrator {
       this.#resultByIdempotencyKey.set(basicRequest.idempotencyKey, result);
       return result;
     }
-    const parsed = ExtractionRequestV1Schema.safeParse({
-      ...basicRequest,
-      expectedPredecessorState: expectedState.data,
-    });
+    const parsed =
+      version === "V1"
+        ? ExtractionRequestV1Schema.safeParse({
+            ...basicRequest,
+            expectedPredecessorState: expectedState.data,
+          })
+        : ExtractionRequestV2Schema.safeParse({
+            ...basicRequest,
+            expectedPredecessorState: expectedState.data,
+          });
     if (!parsed.success) throw new Error("M03_REQUEST_SCHEMA_INTERNAL_INCONSISTENCY");
     const request = parsed.data;
     const requestPreimage = extractionRequestPreimage(request);
@@ -1334,7 +1380,7 @@ export class InMemoryM03Orchestrator {
             .sort((left, right) => compareUnsignedUtf8(canonicalJson(left), canonicalJson(right))),
         });
         extractionId = `ext_${this.#derivedHash("EXTRACTION_ID", {
-          schemaVersion: request.schemaVersion,
+          schemaVersion: version === "V1" ? "M03_EXTRACTION_V1" : "M03_EXTRACTION_V2",
           resourceVersionIdentityId: request.resourceVersionIdentityId,
           resourceVersionObservationId: request.resourceVersionObservationId,
           inputFingerprint,
@@ -1362,11 +1408,22 @@ export class InMemoryM03Orchestrator {
       }
       const aggregateStatus = aggregate(fields);
       const laterProgressionBlockers = progressionBlockers(fields);
+      const projection = loaded.predecessor.m02InputProjection;
+      const strictProjection =
+        version === "V2" ? M03M02InputProjectionV1Schema.parse(projection) : null;
+      const projectionMembers =
+        strictProjection === null
+          ? {}
+          : {
+              m02InputProjection: strictProjection,
+              m02InputProjectionFingerprint: fingerprintM03M02InputProjectionV1(strictProjection),
+            };
       const bundleWithoutOutput = {
-        schemaVersion: request.schemaVersion,
+        schemaVersion: version === "V1" ? "M03_EXTRACTION_V1" : "M03_EXTRACTION_V2",
         extractionId,
         requestFingerprint,
         inputFingerprint,
+        ...projectionMembers,
         m02: {
           handoffMarkerId: request.m02HandoffMarkerId,
           controllingM02JobId: request.controllingM02JobId,
@@ -1440,7 +1497,10 @@ export class InMemoryM03Orchestrator {
         return result;
       }
       const bundle = { ...bundleWithoutOutput, outputFingerprint };
-      const validatedBundle = StructuredExtractionBundleV1Schema.safeParse(bundle);
+      const validatedBundle =
+        version === "V1"
+          ? StructuredExtractionBundleV1Schema.safeParse(bundle)
+          : StructuredExtractionBundleV2Schema.safeParse(bundle);
       if (!validatedBundle.success) {
         const result = processingFailure(
           request,
@@ -1491,7 +1551,7 @@ export class InMemoryM03Orchestrator {
 }
 
 async function readControl(
-  request: ExtractionRequestV1,
+  request: ExtractionRequest,
   loaded: M03LoadedInput,
 ): Promise<"CANCELLED" | "SUPERSEDED_INPUT" | null> {
   const state = await loaded.checkControl();
@@ -1505,7 +1565,7 @@ async function readControl(
 }
 
 function terminalControlResult(
-  request: ExtractionRequestV1,
+  request: ExtractionRequest,
   requestFingerprint: string,
   code: "CANCELLED" | "SUPERSEDED_INPUT",
   lastCompletedStageOrNull: null | "DETERMINISTIC" | "ANALYSIS" | "FINAL_GUARD",
@@ -1546,7 +1606,7 @@ function terminalControlResult(
 }
 
 function processingFailure(
-  request: BasicExtractionRequestV1,
+  request: BasicExtractionRequest,
   requestFingerprint: string,
   errorCode:
     | "INPUT_FINGERPRINT_COLLISION"
@@ -1846,7 +1906,7 @@ function findDeterministicLimit(deterministic: DeterministicResult): {
 }
 
 function deterministicLimitFailure(
-  request: ExtractionRequestV1,
+  request: ExtractionRequest,
   requestFingerprint: string,
   sourceInventoryFingerprint: string,
   deterministic: DeterministicResult,

@@ -7,6 +7,7 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../contracts" },
+    { "path": "../evidence" },
     { "path": "../acquisition" },
     { "path": "../github-source" },
     { "path": "../identity" },

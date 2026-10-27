@@ -410,9 +410,9 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
       source,
       checkControl: async () => predecessor,
     });
-    const first = await orchestrator.execute(Buffer.from(JSON.stringify(request)), load);
-    const replay = await orchestrator.execute(Buffer.from(JSON.stringify(request)), load);
-    const freshKeyReplay = await orchestrator.execute(
+    const first = await orchestrator.executeV1(Buffer.from(JSON.stringify(request)), load);
+    const replay = await orchestrator.executeV1(Buffer.from(JSON.stringify(request)), load);
+    const freshKeyReplay = await orchestrator.executeV1(
       Buffer.from(JSON.stringify({ ...request, idempotencyKey: "idem-2" })),
       load,
     );
@@ -514,7 +514,7 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
       analysisPort: duplicateAdapter,
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const duplicateResult = await duplicateOrchestrator.execute(
+    const duplicateResult = await duplicateOrchestrator.executeV1(
       Buffer.from(
         JSON.stringify({
           ...request,
@@ -638,7 +638,7 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
         analysisPort: invalidAdapter,
         now: () => "2026-08-25T00:00:00.000Z",
       });
-      const invalidResult = await invalidOrchestrator.execute(
+      const invalidResult = await invalidOrchestrator.executeV1(
         Buffer.from(
           JSON.stringify({
             ...request,
@@ -675,7 +675,7 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
       analysisPort: beforePrimaryAdapter,
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const beforePrimary = await beforePrimaryOrchestrator.execute(
+    const beforePrimary = await beforePrimaryOrchestrator.executeV1(
       Buffer.from(
         JSON.stringify({
           ...request,
@@ -733,7 +733,7 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
       analysisPort: beforeRepairAdapter,
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const beforeRepair = await beforeRepairOrchestrator.execute(
+    const beforeRepair = await beforeRepairOrchestrator.executeV1(
       Buffer.from(
         JSON.stringify({
           ...request,
@@ -797,7 +797,7 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
       },
       now: () => "2026-08-25T00:00:00.000Z",
     });
-    const thirdCall = await thirdCallOrchestrator.execute(
+    const thirdCall = await thirdCallOrchestrator.executeV1(
       Buffer.from(
         JSON.stringify({
           ...request,
@@ -862,7 +862,7 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
             ? "f".repeat(64)
             : createHash("sha256").update(bytes).digest("hex"),
       });
-      const firstCollisionRun = await collisionOrchestrator.execute(
+      const firstCollisionRun = await collisionOrchestrator.executeV1(
         Buffer.from(
           JSON.stringify({
             ...request,
@@ -873,7 +873,7 @@ describe("M01/M02 handoff to M03 deterministic fake", () => {
         load,
       );
       expect(firstCollisionRun, domainUnderTest).toMatchObject({ kind: "BUNDLE" });
-      const secondCollisionRun = await collisionOrchestrator.execute(
+      const secondCollisionRun = await collisionOrchestrator.executeV1(
         Buffer.from(JSON.stringify(changedAnalysisRequest)),
         async () => ({
           predecessor,

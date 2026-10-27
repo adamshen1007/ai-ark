@@ -3,6 +3,7 @@ dist
 .turbo
 coverage
 pnpm-lock.yaml
+packages/job-queue/migrations/003_m04_runtime_privileges.json
 docs/design
 docs/architecture/AI ARK*.md
 docs/product

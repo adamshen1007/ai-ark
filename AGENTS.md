@@ -4,22 +4,22 @@
 
 AI ARK is a governed GitHub-to-Skill Technical Alpha that turns a fixed public GitHub revision into structured, evidence-backed, human-reviewable Skill records. Primary alpha users are internal editors/founders and technical reviewers; later validation users and creator participants evaluate approved records and provide evidence.
 
-The validated repository outcome is M02 `GO`: provider-API-only GitHub acquisition produces immutable, policy-versioned snapshots, and the M02 layer adds deterministic classification, attributable AI-analysis contracts, multiple candidate roots, stable Resource/ResourceVersion identity, explicit ambiguity, and governed duplicate/fork/mirror resolution. It does not generate descriptive records or publish product content.
+The validated repository outcome is M03 `GO`: provider-API-only GitHub acquisition produces immutable, policy-versioned snapshots; M02 adds deterministic classification and stable Resource/ResourceVersion identity; and M03 adds deterministic and bounded AI-assisted structured extraction with attributable source references, explicit uncertainty, and immutable extraction bundles. It does not create durable Claims/EvidenceItems, generate drafts, or publish product content.
 
 - Current phase: GitHub-to-Skill Technical Alpha.
-- Completed and publicly verified implementation baseline: M00, M01, and M02.
-- M02 authority: approved `docs/milestones/M02_SPEC.md`, completed implementation, independent `GO — M02 COMMIT READY`, and successful public clean-checkout CI.
-- Current authorization boundary: M02 is frozen. M03 is not started or authorized; a branch name or completed M02 state does not activate it.
+- Completed and publicly verified implementation baseline: M00, M01, M02, and M03.
+- M03 authority: approved `docs/milestones/M03_SPEC.md` at SHA-256 `3946c15149d08b15e50697dc83d746979f0b2a8a87abeb5dbb25a78809949f80`, completed implementation, merged PR #1, and successful public CI run `33422220807`. The merged PR body records the externally reported independent verdict `GO — M03 COMMIT READY`; its original reviewer transcript is not repository/GitHub review evidence.
+- Current authorization boundary: M04 implementation against the exact eleven-document M03/M04 authority chain is approved and authorized, including the alternate-unique conflict clarification at SHA-256 `44f6d6a8577ecd95eb8689446bd5e05d75fbdf52341b26d67e8477a409380e87` and closure-reachability clarification at SHA-256 `3a3e694075fb3897ee68821a7254dbb04b457e7506f854b74879f3d35123875b`. The seventh row-lock correction retains five writer `UPDATE` cells for `SELECT ... FOR UPDATE`, and the 180-cell V2 manifest remains frozen. The local, unapplied migration `003` candidate remains NO-GO until its full unchanged-byte gates and independent R2 review close. Commit, push, PR, merge, deployment, release, publication, production migration, and M05+ remain unauthorized.
 
 ## 2. Scope and Non-Goals
 
-Completed M02 scope is limited to deterministic and AI-assisted classification, candidate-root and multi-Skill detection, non-Skill/ambiguous outcomes, stable Resource/ResourceVersion identity, fork/mirror/duplicate analysis, durable manual-resolution contracts, and deterministic fixtures. Classification evidence remains attributable, deterministic and AI-assisted outputs remain distinguishable, ambiguity blocks automatic progression, and no descriptive summary precedes identity resolution.
+Completed M03 scope includes the frozen M02 identity-resolved handoff plus deterministic structured extraction, bounded attributable AI proposals, complete field/status/conflict contracts, source references, and immutable extraction bundles. M03 persistence is intentionally in-memory: it defines no durable extraction, Claim, or EvidenceItem tables. Deterministic and AI-assisted outputs remain distinguishable, ambiguity remains explicit, and no draft or publication authority exists.
 
-Preserve the completed M02 identity-resolved handoff boundary. Never use later work to make an earlier milestone appear complete.
+Preserve the completed M03 immutable-bundle handoff boundary. Never use later work to make an earlier milestone appear complete.
 
 ### Do not implement in the active milestone
 
-- M03+ structured extraction, evidence binding, draft generation, editorial review, publication, directory/search, validation harness, or user validation.
+- M05+ draft generation, editorial review, publication, directory/search, validation harness, or user validation.
 - Full marketplace, public accounts/profiles/comments/reviews/creator claims, broad ranking, Labs, public API/MCP/Agent catalogue, dynamic workflows, payments, sponsorship, mirroring, or public Mainland deployment.
 - Autonomous installation or execution, automatic verification badges, automatic or public publication, semantic search, graph databases, Redis, Kafka, Elasticsearch, Kubernetes, or a microservice network.
 - Runtime verification of acquired repositories, live-provider-required CI, speculative platform abstractions, empty packages, placeholder production services, unrelated refactors, or production deployment.
@@ -36,7 +36,7 @@ Apply repository sources in this precedence order:
 6. Other files under `docs/product/`, `specs/`, `docs/ux/`, `docs/design/`, and `docs/validation/`
 7. The approved Figma prototype, for visual hierarchy and interaction only
 
-Within that hierarchy, the approved active-milestone spec controls its defined implementation scope and acceptance criteria. Completed scoped evidence includes `docs/milestones/M01_SPEC.md`, `docs/milestones/M01_REPORT.md`, `docs/milestones/M02_SPEC.md`, and `docs/milestones/M02_REPORT.md`. No M03 specification or implementation is authorized.
+Within that hierarchy, the approved active-milestone spec controls its defined implementation scope and acceptance criteria. Completed scoped evidence includes `docs/milestones/M01_SPEC.md`, `docs/milestones/M01_REPORT.md`, `docs/milestones/M02_SPEC.md`, `docs/milestones/M02_REPORT.md`, `docs/milestones/M03_SPEC.md`, and `docs/milestones/M03_REPORT.md`. Current implementation authority is the exact eleven-document chain of `M03_SPEC.md`, `M04_SPEC.md`, `M03_M04_HANDOFF_AMENDMENT.md`, `M03_M04_PERSISTENCE_CORRECTION_AMENDMENT.md`, `M03_M04_AUTHORITY_OID_AMENDMENT.md`, `M03_M04_PRIVILEGE_NECESSITY_AMENDMENT.md`, `M03_M04_ROW_LOCK_PRIVILEGE_CORRECTION_AMENDMENT.md`, `M03_M04_CANONICAL_NUMBER_CORRECTION_AMENDMENT.md`, `M03_M04_IDEMPOTENCY_KEY_TEXT_ENCODING_AMENDMENT.md`, `M03_M04_ALTERNATE_UNIQUE_CONFLICT_CLARIFICATION_AMENDMENT.md`, and `M03_M04_ALTERNATE_UNIQUE_CLOSURE_REACHABILITY_AMENDMENT.md` at their individually approved SHA-256 values; reports do not expand that chain.
 
 Use `README.md` as the repository entry point; `docs/architecture/ARCHITECTURE.md`, `docs/architecture/DEPENDENCY_RULES.md`, `docs/architecture/SECURITY_BOUNDARIES.md`, accepted ADRs, and `docs/governance/` refine the authorities above. Reports record evidence but do not silently expand authorization.
 
@@ -48,7 +48,7 @@ Resolve conflicts by preserving security and evidence integrity first, then narr
 - Intended base: `main`; the public `origin` is `https://github.com/adamshen1007/ai-ark.git`, and local `main` tracks `origin/main`.
 - Runtime: Node `22.23.1`, pnpm `11.7.0`, TypeScript `6.0.3`; versions are pinned in `.node-version`, `.nvmrc`, and `package.json`.
 - CI: `.github/workflows/ci.yml` runs frozen installation and `pnpm verify` on pull requests and pushes to `main`.
-- Implemented packages: `contracts`, `config`, `testing`, `acquisition`, `github-source`, `object-storage`, `job-queue`, `observability`, `analysis`, `classification`, and `identity` under `packages/`.
+- Implemented packages: `contracts`, `config`, `testing`, `acquisition`, `github-source`, `object-storage`, `job-queue`, `observability`, `analysis`, `classification`, `identity`, and `extraction` under `packages/`.
 - Supporting areas: `fixtures/`, `scripts/`, `docs/`, and `specs/`. Do not create the future `apps/` or package layout until its owning milestone needs real behavior.
 - Planned provider-neutral services: GitHub API/content endpoints, PostgreSQL, S3-compatible object storage, an OIDC-compatible identity provider, and an approved AI provider. No production environment or concrete OIDC/AI/storage vendor is selected here.
 
@@ -91,17 +91,19 @@ Run from the repository root with the pinned runtime.
 
 `pnpm verify` does not replace milestone-required fixture, adversarial, integration, E2E, migration, recovery, accessibility, or smoke checks. Do not use the execution prompt’s illustrative `--filter` syntax with Vitest 4; use the positional forms proven in milestone specs/reports.
 
+For an exact integration file, use `pnpm exec vitest run --config vitest.integration.config.ts <repository-relative-test-file>` and add `-t '<test-name>'` only when intentionally selecting cases. Do not use `pnpm test:integration -- <filter>`: this argument boundary has caused unintended broad integration runs. Check the runner's selected-file output before treating a focused invocation as evidence.
+
 ## 7. Acceptance and Verification Gates
 
 Before a milestone `GO`, require an approved milestone spec, scoped implementation and fixtures, requirement-to-test traceability, all milestone-specific commands, all relevant regression gates, `pnpm verify`, `git diff --check`, a security/secrets review, documentation/path/schema validation as applicable, and a whole-branch diff against local `main`. Review all staged, unstaged, and untracked files and perform a separate independent review pass when available.
 
-For M02 specifically, observable gates are:
+For M04, if and only if its exact specification and implementation are separately authorized, observable gates include:
 
-1. Classification evidence is retained and deterministic output is distinguishable from AI-assisted output.
-2. One repository can yield multiple independently rooted candidates; `NON_SKILL` stops Skill-page generation.
-3. Ambiguity is explicit and blocking; duplicate/fork/mirror handling does not create uncontrolled Resources.
-4. New versions attach to stable Resource identity and no descriptive summary is generated before identity resolution.
-5. Classification, identity, AI-analysis contract, fixture, and adversarial tests pass offline, together with typecheck, lint, build, `pnpm verify`, M00/M01 regressions, migration checks if schemas change, and authority-document integrity checks.
+1. Every persisted Claim and EvidenceItem is closed over one immutable, byte-validated M03 bundle and its M01/M02 lineage.
+2. Material claims without qualifying evidence remain explicit and block M05 progression; evidence cannot self-authorize a claim.
+3. The durable PostgreSQL boundary is forward-only, idempotent, transactionally fenced, append-only except for supersession, and recoverable.
+4. Secret, personal-contact, restricted, or prompt-injection content cannot enter public excerpts, Claims, logs, or AI instructions.
+5. Evidence, migration, recovery, fixture, adversarial, integration, regression, and `pnpm verify` gates pass under the pinned runtime, with whole-diff and authority-integrity review.
 
 Never weaken, skip, hide, or relabel a failed gate. For every unrun gate, record the reason, strongest substitute evidence, and readiness impact. Pending external measurement is `PENDING`, never zero or a pass. Do not claim milestone `GO` without exact command output and diff evidence.
 

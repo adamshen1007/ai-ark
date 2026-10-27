@@ -5,6 +5,7 @@ export default defineConfig({
     environment: "node",
     globals: false,
     passWithNoTests: false,
+    fileParallelism: false,
     sequence: { concurrent: false },
   },
 });

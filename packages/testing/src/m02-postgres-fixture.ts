@@ -707,6 +707,7 @@ export async function seedM02SystemReanalysisGraph(
   schema: string,
   fixture: M02SystemIdentityFixture,
   mode: "S9_JC" | "S9_JR" | "S10_JR",
+  writerPool: Pool,
   replacementReasonCode:
     "POLICY_OR_METHODOLOGY_CHANGE" | "RETRY_EXHAUSTED" = "POLICY_OR_METHODOLOGY_CHANGE",
 ): Promise<M02SystemIdentityFixture> {
@@ -773,7 +774,10 @@ export async function seedM02SystemReanalysisGraph(
     timestamp: "2026-08-22T00:00:00.000Z",
     payload,
   };
-  const adapter = new PostgresManualResolutionAdapter(pool, { schema });
+  const adapter = new PostgresManualResolutionAdapter(writerPool, {
+    schema,
+    peerLoginRole: "ai_ark_m04_login",
+  });
   const command: ManualResolutionEnvelope = {
     ...provisional,
     expectedVersions: { ...(await adapter.discoverRequiredCurrentExpectations(provisional)) },

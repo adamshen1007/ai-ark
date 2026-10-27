@@ -20,6 +20,9 @@ importers:
       globals:
         specifier: 17.9.0
         version: 17.9.0
+      pg:
+        specifier: 8.22.0
+        version: 8.22.0
       prettier:
         specifier: 3.9.6
         version: 3.9.6
@@ -75,6 +78,12 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/evidence:
+    dependencies:
+      '@ai-ark/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
   packages/extraction:
     dependencies:
       '@ai-ark/contracts':
@@ -122,6 +131,9 @@ importers:
       '@ai-ark/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@ai-ark/evidence':
+        specifier: workspace:*
+        version: link:../evidence
       '@ai-ark/identity':
         specifier: workspace:*
         version: link:../identity
@@ -152,6 +164,9 @@ importers:
       '@ai-ark/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@ai-ark/evidence':
+        specifier: workspace:*
+        version: link:../evidence
       '@ai-ark/extraction':
         specifier: workspace:*
         version: link:../extraction
