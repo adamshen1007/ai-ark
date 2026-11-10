@@ -13,6 +13,8 @@ import {
   StructuredExtractionBundleV2Schema,
   canonicalJsonM03,
   type M04AlternateUniqueKeyKindV1,
+  type AcceptedBindingReadResultV1,
+  type AcceptedBindingSnapshotV1,
   type SafeDiagnosticV1,
   type EvidenceBindingResultV1,
   type StructuredExtractionBundleV2,
@@ -717,6 +719,52 @@ function validateStoredAssociation(row: StoredBindingRow): ValidatedStoredAssoci
       replayed: true,
       resultFingerprint: row.result_fingerprint,
     },
+  };
+}
+
+function snapshotFromStoredAssociation(
+  association: ValidatedStoredAssociation,
+): AcceptedBindingSnapshotV1 {
+  const { row, bundle, logicalPayload, accepted } = association;
+  const request = EvidenceBindingRequestV1Schema.parse(
+    JSON.parse(decoder.decode(row.request_canonical_payload)),
+  );
+  const projected = projectEvidenceBinding(bundle);
+  if (accepted.kind !== "ACCEPTED")
+    throw new PersistenceIntegrityError("M05_M04_READ_RESULT_INVALID", "BINDING_RESULT", null);
+  const evidenceItems = [...projected.evidenceItems].sort((left, right) =>
+    Buffer.compare(Buffer.from(left.id, "utf8"), Buffer.from(right.id, "utf8")),
+  );
+  const bindingPreimage = {
+    schemaVersion: "M04_BINDING_ID_V1" as const,
+    extractionId: bundle.extractionId,
+    logicalPayloadSha256: sha256(logicalPayload),
+    evidencePolicyVersion: request.evidencePolicyVersion,
+    materialFieldRegistryVersion: request.materialFieldRegistryVersion,
+    evidenceItemIds: evidenceItems.map(({ id }) => id),
+    claimIds: projected.claims.map(({ id }) => id),
+    linkIds: projected.links.map(({ id }) => id),
+    completenessId: projected.completeness.id,
+  };
+  const { idempotencyKey: _idempotencyKey, ...semanticRequest } = request;
+  void _idempotencyKey;
+  return {
+    schemaVersion: "M05_ACCEPTED_BINDING_SNAPSHOT_V1",
+    bindingPreimage,
+    acceptedResultRecord: {
+      schemaVersion: "M04_RESULT_V1",
+      resultId: accepted.resultId,
+      kind: "ACCEPTED",
+      bindingId: accepted.bindingId,
+      extractionId: accepted.extractionId,
+      completenessId: accepted.completeness.id,
+    },
+    bundle,
+    semanticRequest,
+    evidenceItems,
+    claims: [...projected.claims],
+    links: [...projected.links],
+    completeness: projected.completeness,
   };
 }
 
@@ -1446,6 +1494,96 @@ export class PostgresEvidencePersistenceAdapterV1 implements EvidencePersistence
       }
     }
     return failure(candidate, true);
+  }
+
+  public async readAcceptedBinding(
+    bindingId: string,
+    expectedExtractionId: string,
+    expectedBindingFingerprint: string,
+  ): Promise<AcceptedBindingReadResultV1> {
+    if (
+      !/^bnd_[a-f0-9]{64}$/u.test(bindingId) ||
+      !/^ext_[a-f0-9]{64}$/u.test(expectedExtractionId) ||
+      !/^[a-f0-9]{64}$/u.test(expectedBindingFingerprint)
+    )
+      return { kind: "NOT_FOUND" };
+    let client: PoolClient;
+    try {
+      client = await this.pool.connect();
+    } catch {
+      return { kind: "UNAVAILABLE" };
+    }
+    try {
+      await this.assertRuntimeAuthority(client);
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await client.query(`SET LOCAL search_path TO ${this.#schemaSql}, public`);
+      await this.lockRelations(client, CANONICAL_RELATIONS);
+      const requestIds = (
+        await this.queryDomain<{ id: string }>(
+          client,
+          `SELECT id FROM ${this.#schemaSql}.m04_binding_requests WHERE binding_id=$1 ORDER BY id COLLATE pg_catalog."C"`,
+          [bindingId],
+        )
+      ).rows;
+      if (requestIds.length === 0) {
+        await client.query("ROLLBACK");
+        return { kind: "NOT_FOUND" };
+      }
+      let snapshot: AcceptedBindingSnapshotV1 | undefined;
+      let firstCanonical: string | undefined;
+      for (const { id } of requestIds) {
+        const rows = await this.lookupMany(client, "request.id=$1", [id]);
+        if (rows.length !== 1)
+          throw new PersistenceIntegrityError(
+            "M05_M04_READ_ASSOCIATION_HIDDEN",
+            "REQUEST_ASSOCIATION",
+            id,
+          );
+        const [row] = rows;
+        if (row === undefined)
+          throw new PersistenceIntegrityError(
+            "M05_M04_READ_ASSOCIATION_HIDDEN",
+            "REQUEST_ASSOCIATION",
+            id,
+          );
+        const association = validateStoredAssociation(row);
+        const candidateSnapshot = snapshotFromStoredAssociation(association);
+        const candidateCanonical = canonicalJsonM03(candidateSnapshot);
+        if (firstCanonical !== undefined && candidateCanonical !== firstCanonical)
+          throw new PersistenceIntegrityError(
+            "M05_M04_READ_ALIAS_DIVERGENCE",
+            "REQUEST_ASSOCIATION",
+            null,
+          );
+        if (snapshot === undefined) {
+          snapshot = candidateSnapshot;
+          firstCanonical = candidateCanonical;
+        }
+      }
+      if (snapshot === undefined) throw new PersistenceIntegrityError("M05_M04_READ_EMPTY");
+      if (
+        snapshot.bundle.extractionId !== expectedExtractionId ||
+        snapshot.acceptedResultRecord.bindingId.slice(4) !== expectedBindingFingerprint
+      ) {
+        await client.query("COMMIT");
+        return { kind: "EXPECTED_BINDING_MISMATCH" };
+      }
+      await client.query("COMMIT");
+      return { kind: "FOUND", snapshot };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      const message = error instanceof Error ? error.message : "";
+      return {
+        kind:
+          message === "M04_DATABASE_ROLE_AUTHORITY_DRIFT"
+            ? "AUTHORITY_INVALID"
+            : error instanceof PersistenceIntegrityError
+              ? "INTEGRITY_FAILED"
+              : "UNAVAILABLE",
+      };
+    } finally {
+      client.release();
+    }
   }
 
   private async findCollisionAfterUnique(

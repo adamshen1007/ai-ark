@@ -13,6 +13,7 @@ export * from "./m02-human-projectors.js";
 export * from "./postgres-manual-resolution.js";
 export * from "./postgres-system-identity.js";
 export * from "./postgres-evidence-persistence.js";
+export * from "./postgres-draft-persistence.js";
 
 const stageOrder: readonly AcquisitionStage[] = [
   "RECEIVED",

@@ -7,6 +7,7 @@ const { Client } = pg;
 
 export const MIGRATION_DIRECTORY = new URL("../packages/job-queue/migrations/", import.meta.url);
 export const M04_RUNTIME_MANIFEST_NAME = "003_m04_runtime_privileges.json";
+export const M05_RUNTIME_MANIFEST_NAME = "004_m05_runtime_privileges.json";
 export const FROZEN_MIGRATION_HASHES = Object.freeze({
   "001_m01_acquisition_jobs.sql":
     "4896d8240d81bcdacc8763c0ba4e09cc12ce17983519acb798612d29b4434958",
@@ -17,6 +18,10 @@ export const FROZEN_MIGRATION_HASHES = Object.freeze({
 });
 export const FROZEN_RUNTIME_MANIFEST_HASH =
   "09de293bd6132c124c086d4d3e75a357e6867383d36821602c53e5b496a8a991";
+export const FROZEN_M05_MIGRATION_HASH =
+  "8e0ebdc73bdee46a9b21a761ecfd2489f5c4112d7ba5bea3fe6ca3ba9a42fa37";
+export const FROZEN_M05_RUNTIME_MANIFEST_HASH =
+  "1a6251b3e7a5155bb3d5fad9354247cd1b5d383db3b628d164d5af0fdd4f6a9f";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const compareUtf8 = (left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right));
@@ -250,6 +255,36 @@ export function validateRuntimePrivilegeManifest(rawBytes) {
   return manifest;
 }
 
+export function validateM05RuntimePrivilegeManifest(rawBytes) {
+  let manifest;
+  try {
+    manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(rawBytes));
+  } catch {
+    throw new Error("M05_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
+  }
+  const group = manifest?.groups?.[0];
+  if (
+    !exactKeys(manifest, ["schemaVersion", "groups"]) ||
+    manifest.schemaVersion !== "M05_RUNTIME_PRIVILEGES_V1" ||
+    !Array.isArray(manifest.groups) ||
+    manifest.groups.length !== 1 ||
+    !exactKeys(group, ["role", "relations", "functions", "sequences"]) ||
+    group.role !== "M05_WRITER_GROUP" ||
+    JSON.stringify(group.functions) !== "[]" ||
+    JSON.stringify(group.sequences) !== "[]" ||
+    JSON.stringify(group.relations) !==
+      JSON.stringify(
+        ["input_chunks", "inputs", "requests", "revisions"].map((name) => ({
+          name,
+          operations: ["SELECT", "INSERT"],
+        })),
+      ) ||
+    Buffer.compare(Buffer.from(`${canonicalJson(manifest)}\n`, "utf8"), Buffer.from(rawBytes)) !== 0
+  )
+    throw new Error("M05_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
+  return manifest;
+}
+
 export function m04MigrationIdentity(sqlHash, manifestHash) {
   if (![sqlHash, manifestHash].every((hash) => /^[0-9a-f]{64}$/u.test(hash)))
     throw new Error("M04_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
@@ -270,9 +305,13 @@ export function quoteDatabaseIdentifier(identifier) {
   return `"${validateDatabaseSchemaName(identifier).replaceAll('"', '""')}"`;
 }
 
-export function renderMigrationSql(sql, schema, manifest) {
+export function renderMigrationSql(sql, schema, manifest, m05LoginRole = "ai_ark_m05_login") {
   const schemaSql = quoteDatabaseIdentifier(schema);
-  if (sql.includes("<M04_RUNTIME_GRANTS>") !== (manifest !== undefined))
+  const m05 = manifest?.schemaVersion === "M05_RUNTIME_PRIVILEGES_V1";
+  if (
+    sql.includes("<M04_RUNTIME_GRANTS>") !== (manifest !== undefined && !m05) ||
+    sql.includes("<M05_RUNTIME_GRANTS>") !== m05
+  )
     throw new Error("M04_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
   const roleNames = {
     M01_M02_WRITER_GROUP: "ai_ark_m01_m02_writer",
@@ -281,48 +320,68 @@ export function renderMigrationSql(sql, schema, manifest) {
   const grants =
     manifest === undefined
       ? ""
-      : [
-          ...[
-            ...new Set(manifest.groups.flatMap((group) => group.relations.map(({ name }) => name))),
-          ]
-            .sort(compareUtf8)
-            .map(
-              (name) =>
-                `REVOKE ALL ON TABLE ${schemaSql}.${name} FROM PUBLIC, ai_ark_m01_m02_writer, ai_ark_m04_runtime;`,
+      : m05
+        ? [
+            ...manifest.groups[0].relations.map(
+              ({ name }) =>
+                `REVOKE ALL ON TABLE ai_ark_m05.${name} FROM PUBLIC, ai_ark_m05_writer;`,
             ),
-          ...[...new Set(manifest.groups.flatMap((group) => group.functions))]
-            .sort(compareUtf8)
-            .map(
-              (signature) =>
-                `REVOKE ALL ON FUNCTION ${schemaSql}.${signature} FROM PUBLIC, ai_ark_m01_m02_writer, ai_ark_m04_runtime;`,
+            ...manifest.groups[0].relations.map(
+              ({ name, operations }) =>
+                `GRANT ${operations.join(",")} ON TABLE ai_ark_m05.${name} TO ai_ark_m05_writer;`,
             ),
-          ...[
-            ...new Set(manifest.groups.flatMap((group) => group.sequences.map(({ name }) => name))),
-          ]
-            .sort(compareUtf8)
-            .map(
-              (name) =>
-                `REVOKE ALL ON SEQUENCE ${schemaSql}.${name} FROM PUBLIC, ai_ark_m01_m02_writer, ai_ark_m04_runtime;`,
-            ),
-          ...manifest.groups.flatMap((group) => {
-            const role = roleNames[group.role];
-            if (role === undefined) throw new Error("M04_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
-            return [
-              ...group.relations.map(
-                ({ name, operations }) =>
-                  `GRANT ${operations.join(",")} ON TABLE ${schemaSql}.${name} TO ${role};`,
+          ].join("\n")
+        : [
+            ...[
+              ...new Set(
+                manifest.groups.flatMap((group) => group.relations.map(({ name }) => name)),
               ),
-              ...group.functions.map(
-                (signature) => `GRANT EXECUTE ON FUNCTION ${schemaSql}.${signature} TO ${role};`,
+            ]
+              .sort(compareUtf8)
+              .map(
+                (name) =>
+                  `REVOKE ALL ON TABLE ${schemaSql}.${name} FROM PUBLIC, ai_ark_m01_m02_writer, ai_ark_m04_runtime;`,
               ),
-              ...group.sequences.map(
-                ({ name, operations }) =>
-                  `GRANT ${operations.join(",")} ON SEQUENCE ${schemaSql}.${name} TO ${role};`,
+            ...[...new Set(manifest.groups.flatMap((group) => group.functions))]
+              .sort(compareUtf8)
+              .map(
+                (signature) =>
+                  `REVOKE ALL ON FUNCTION ${schemaSql}.${signature} FROM PUBLIC, ai_ark_m01_m02_writer, ai_ark_m04_runtime;`,
               ),
-            ];
-          }),
-        ].join("\n");
-  return sql.replaceAll("<S>", schemaSql).replaceAll("<M04_RUNTIME_GRANTS>", grants);
+            ...[
+              ...new Set(
+                manifest.groups.flatMap((group) => group.sequences.map(({ name }) => name)),
+              ),
+            ]
+              .sort(compareUtf8)
+              .map(
+                (name) =>
+                  `REVOKE ALL ON SEQUENCE ${schemaSql}.${name} FROM PUBLIC, ai_ark_m01_m02_writer, ai_ark_m04_runtime;`,
+              ),
+            ...manifest.groups.flatMap((group) => {
+              const role = roleNames[group.role];
+              if (role === undefined) throw new Error("M04_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
+              return [
+                ...group.relations.map(
+                  ({ name, operations }) =>
+                    `GRANT ${operations.join(",")} ON TABLE ${schemaSql}.${name} TO ${role};`,
+                ),
+                ...group.functions.map(
+                  (signature) => `GRANT EXECUTE ON FUNCTION ${schemaSql}.${signature} TO ${role};`,
+                ),
+                ...group.sequences.map(
+                  ({ name, operations }) =>
+                    `GRANT ${operations.join(",")} ON SEQUENCE ${schemaSql}.${name} TO ${role};`,
+                ),
+              ];
+            }),
+          ].join("\n");
+  validateDatabaseSchemaName(m05LoginRole);
+  return sql
+    .replaceAll("<S>", schemaSql)
+    .replaceAll("<M04_RUNTIME_GRANTS>", m05 ? "" : grants)
+    .replaceAll("<M05_RUNTIME_GRANTS>", m05 ? grants : "")
+    .replaceAll("<M05_LOGIN>", m05LoginRole);
 }
 
 const SAFE_DATABASE_ERROR_CODES = new Set([
@@ -401,19 +460,41 @@ export async function loadMigrations() {
       const frozen = FROZEN_MIGRATION_HASHES[filename];
       if (frozen !== undefined && frozen !== sqlHash)
         throw new Error("M04_FROZEN_MIGRATION_HASH_MISMATCH");
+      if (filename === "004_m05_draft_projection.sql" && sqlHash !== FROZEN_M05_MIGRATION_HASH)
+        throw new Error("M04_FROZEN_MIGRATION_HASH_MISMATCH");
       const manifestBytes =
         filename === "003_m04_evidence_binding.sql"
           ? await readFile(new URL(M04_RUNTIME_MANIFEST_NAME, MIGRATION_DIRECTORY))
-          : undefined;
+          : filename === "004_m05_draft_projection.sql"
+            ? await readFile(new URL(M05_RUNTIME_MANIFEST_NAME, MIGRATION_DIRECTORY))
+            : undefined;
       const manifest =
-        manifestBytes === undefined ? undefined : validateRuntimePrivilegeManifest(manifestBytes);
+        manifestBytes === undefined
+          ? undefined
+          : filename.startsWith("004_")
+            ? validateM05RuntimePrivilegeManifest(manifestBytes)
+            : validateRuntimePrivilegeManifest(manifestBytes);
       const manifestHash = manifestBytes === undefined ? undefined : sha256(manifestBytes);
-      if (manifestHash !== undefined && manifestHash !== FROZEN_RUNTIME_MANIFEST_HASH)
+      if (
+        filename === "003_m04_evidence_binding.sql" &&
+        manifestHash !== undefined &&
+        manifestHash !== FROZEN_RUNTIME_MANIFEST_HASH
+      )
         throw new Error("M04_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
+      if (
+        filename === "004_m05_draft_projection.sql" &&
+        manifestHash !== FROZEN_M05_RUNTIME_MANIFEST_HASH
+      )
+        throw new Error("M05_RUNTIME_PRIVILEGE_MANIFEST_INVALID");
       return {
         version: filename.slice(0, 3),
         filename,
-        sha256: manifestHash === undefined ? sqlHash : m04MigrationIdentity(sqlHash, manifestHash),
+        sha256:
+          manifestHash === undefined
+            ? sqlHash
+            : filename.startsWith("004_")
+              ? sha256(`AI_ARK_M05_004_MANIFEST_V1\n${sqlHash}\n${manifestHash}\n`)
+              : m04MigrationIdentity(sqlHash, manifestHash),
         sqlSha256: sqlHash,
         manifestSha256: manifestHash,
         manifest,
@@ -430,13 +511,15 @@ export function databaseConfiguration(env = process.env) {
   const ownershipSentinel = env.AI_ARK_DATABASE_OWNERSHIP_SENTINEL;
   const m04LoginRole = env.AI_ARK_M04_DATABASE_LOGIN_ROLE;
   const m01M02LoginRole = env.AI_ARK_M01_M02_DATABASE_LOGIN_ROLE;
+  const m05LoginRole = env.AI_ARK_M05_DATABASE_LOGIN_ROLE;
   if (
     !databaseUrl ||
     !environment ||
     !allowedHosts ||
     !ownershipSentinel ||
     !m04LoginRole ||
-    !m01M02LoginRole
+    !m01M02LoginRole ||
+    !m05LoginRole
   )
     throw new Error("M04_DATABASE_CONFIGURATION_REQUIRED");
   validateDatabaseTarget({ databaseUrl, environment, allowedHosts });
@@ -446,8 +529,10 @@ export function databaseConfiguration(env = process.env) {
   validateDatabaseSchemaName(schema);
   validateDatabaseSchemaName(m04LoginRole);
   validateDatabaseSchemaName(m01M02LoginRole);
-  if (m04LoginRole === m01M02LoginRole) throw new Error("M04_DATABASE_ROLE_CONFIGURATION_INVALID");
-  return { databaseUrl, schema, ownershipSentinel, m04LoginRole, m01M02LoginRole };
+  validateDatabaseSchemaName(m05LoginRole);
+  if (new Set([m04LoginRole, m01M02LoginRole, m05LoginRole]).size !== 3)
+    throw new Error("M04_DATABASE_ROLE_CONFIGURATION_INVALID");
+  return { databaseUrl, schema, ownershipSentinel, m04LoginRole, m01M02LoginRole, m05LoginRole };
 }
 
 export async function connectDatabase(env = process.env) {
@@ -616,6 +701,24 @@ export async function expectedSchemaCatalog(
     );
     for (const migration of migrations.slice(0, prefixLength))
       await client.query(renderMigrationSql(migration.sql, scratch, migration.manifest));
+    const catalog = await readSchemaCatalog(client, scratch);
+    await client.query("ROLLBACK");
+    return catalog;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
+export async function expectedM05SchemaCatalog(client, migration, m05LoginRole) {
+  const scratch = `m05_catalog_${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+  validateDatabaseSchemaName(scratch);
+  await client.query("BEGIN");
+  try {
+    const rendered = renderMigrationSql(migration.sql, "public", migration.manifest, m05LoginRole)
+      .replaceAll("SCHEMA ai_ark_m05", `SCHEMA ${scratch}`)
+      .replaceAll("ai_ark_m05.", `${scratch}.`);
+    await client.query(rendered);
     const catalog = await readSchemaCatalog(client, scratch);
     await client.query("ROLLBACK");
     return catalog;

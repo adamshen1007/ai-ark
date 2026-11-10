@@ -82,8 +82,10 @@ async function disposableEnvironment(name: string): Promise<Record<string, strin
     AI_ARK_DATABASE_OWNERSHIP_SENTINEL: sentinel,
     AI_ARK_M04_DATABASE_LOGIN_ROLE: "ai_ark_m04_login",
     AI_ARK_M01_M02_DATABASE_LOGIN_ROLE: "ai_ark_m01_m02_login",
+    AI_ARK_M05_DATABASE_LOGIN_ROLE: "ai_ark_m05_login",
     AI_ARK_M04_DATABASE_RUNTIME_URL: harness.connectionUriForRole("ai_ark_m04_login", name),
     AI_ARK_M01_M02_DATABASE_WRITER_URL: harness.connectionUriForRole("ai_ark_m01_m02_login", name),
+    AI_ARK_M05_DATABASE_RUNTIME_URL: harness.connectionUriForRole("ai_ark_m05_login", name),
   };
 }
 
@@ -123,14 +125,16 @@ describe("M04 migration runner", () => {
       AI_ARK_DATABASE_OWNERSHIP_SENTINEL: sentinel,
       AI_ARK_M04_DATABASE_LOGIN_ROLE: "ai_ark_m04_login",
       AI_ARK_M01_M02_DATABASE_LOGIN_ROLE: "ai_ark_m01_m02_login",
+      AI_ARK_M05_DATABASE_LOGIN_ROLE: "ai_ark_m05_login",
       AI_ARK_M04_DATABASE_RUNTIME_URL: harness.connectionUriForRole("ai_ark_m04_login"),
       AI_ARK_M01_M02_DATABASE_WRITER_URL: harness.connectionUriForRole("ai_ark_m01_m02_login"),
+      AI_ARK_M05_DATABASE_RUNTIME_URL: harness.connectionUriForRole("ai_ark_m05_login"),
     };
     await expect(
       migrate({ ...env, AI_ARK_DATABASE_OWNERSHIP_SENTINEL: "wrong-sentinel-value" }),
     ).rejects.toThrow("M04_DATABASE_SENTINEL_MISMATCH");
-    expect(await migrate(env)).toEqual({ appliedFrom: 0, total: 3 });
-    expect(await validate(env)).toMatchObject({ migrations: 3, tables: 10 });
+    expect(await migrate(env)).toEqual({ appliedFrom: 0, total: 4 });
+    expect(await validate(env)).toMatchObject({ migrations: 4, tables: 10 });
     const authority = new Client({ connectionString: env.AI_ARK_DATABASE_URL });
     await authority.connect();
     try {
@@ -198,10 +202,42 @@ describe("M04 migration runner", () => {
         authority.query("SELECT nextval('m04_runner.m02_rejected_command_audits_id_seq')"),
       ).resolves.toHaveProperty("rowCount", 1);
       await authority.query("ROLLBACK");
+      await authority.query("CREATE ROLE ai_ark_m05_validator_probe NOLOGIN");
+      for (const [grant, revoke] of [
+        [
+          "GRANT ai_ark_m05_writer TO ai_ark_m05_validator_probe",
+          "REVOKE ai_ark_m05_writer FROM ai_ark_m05_validator_probe",
+        ],
+        [
+          "GRANT ai_ark_m05_validator_probe TO ai_ark_m05_writer",
+          "REVOKE ai_ark_m05_validator_probe FROM ai_ark_m05_writer",
+        ],
+        [
+          "GRANT ai_ark_m04_runtime TO ai_ark_m05_writer",
+          "REVOKE ai_ark_m04_runtime FROM ai_ark_m05_writer",
+        ],
+      ] as const) {
+        await authority.query(grant);
+        try {
+          await expect(validate(env), grant).rejects.toThrow("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+        } finally {
+          await authority.query(revoke);
+        }
+        await expect(validate(env), revoke).resolves.toMatchObject({ migrations: 4 });
+      }
+      await authority.query("ALTER ROLE ai_ark_m05_validator_probe CREATEROLE");
+      await authority.query("GRANT ai_ark_m05_validator_probe TO ai_ark_m05_login");
+      try {
+        await expect(validate(env)).rejects.toThrow("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+      } finally {
+        await authority.query("REVOKE ai_ark_m05_validator_probe FROM ai_ark_m05_login");
+        await authority.query("ALTER ROLE ai_ark_m05_validator_probe NOCREATEROLE");
+      }
+      await authority.query("DROP ROLE ai_ark_m05_validator_probe");
     } finally {
       await authority.end();
     }
-    expect(await migrate(env)).toEqual({ appliedFrom: 3, total: 3 });
+    expect(await migrate(env)).toEqual({ appliedFrom: 4, total: 4 });
   }, 120_000);
 
   it("rejects a nonexistent target schema before any predecessor or ledger side effect", async () => {
@@ -248,7 +284,7 @@ describe("M04 migration runner", () => {
             AND a.attname='idempotency_key'`,
       );
       expect(identity.rows).toEqual([{ column_uses_c: true, index_uses_c: true }]);
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
       await owner.query(
         `ALTER TABLE m04_binding_requests
            ALTER COLUMN idempotency_key TYPE text COLLATE m04_numeric_icu`,
@@ -259,8 +295,8 @@ describe("M04 migration runner", () => {
         `ALTER TABLE m04_binding_requests
            ALTER COLUMN idempotency_key TYPE text COLLATE pg_catalog."C"`,
       );
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
-      await expect(migrate(env)).resolves.toEqual({ appliedFrom: 3, total: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
+      await expect(migrate(env)).resolves.toEqual({ appliedFrom: 4, total: 4 });
     } finally {
       await owner.end();
     }
@@ -270,8 +306,8 @@ describe("M04 migration runner", () => {
     for (const prefixLength of [1, 2]) {
       const env = await disposableEnvironment(`m04_prefix_${String(prefixLength)}`);
       await applyPrefix(env, prefixLength);
-      expect(await migrate(env)).toEqual({ appliedFrom: prefixLength, total: 3 });
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      expect(await migrate(env)).toEqual({ appliedFrom: prefixLength, total: 4 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     }
     const driftEnv = await disposableEnvironment("m04_prefix_drift");
     await applyPrefix(driftEnv, 1);
@@ -292,12 +328,15 @@ describe("M04 migration runner", () => {
       ["after_002", { failAfterVersion: "002" }, 2],
       ["during_003", { failDuringVersion: "003" }, 2],
       ["ledger_003", { failBeforeLedgerCommitVersion: "003" }, 2],
+      ["during_004", { failDuringVersion: "004" }, 3],
+      ["ledger_004", { failBeforeLedgerCommitVersion: "004" }, 3],
+      ["after_004", { failAfterVersion: "004" }, 4],
     ] as const;
     for (const [name, fault, expectedPrefix] of cases) {
       const env = await disposableEnvironment(`m04_interrupt_${name}`);
       await expect(migrate(env, fault)).rejects.toThrow(/M04_TEST_MIGRATION_INTERRUPTED/u);
-      expect(await migrate(env)).toEqual({ appliedFrom: expectedPrefix, total: 3 });
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      expect(await migrate(env)).toEqual({ appliedFrom: expectedPrefix, total: 4 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     }
   }, 240_000);
 
@@ -358,7 +397,7 @@ describe("M04 migration runner", () => {
       await client.query(mutate);
       await expect(validate(env), kind).rejects.toThrow("M04_SCHEMA_CATALOG_DRIFT");
       await client.query(restore);
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     }
     const originalFunction = (
       await client.query<{ definition: string }>(
@@ -372,7 +411,7 @@ describe("M04 migration runner", () => {
     await expect(validate(env)).rejects.toThrow("M04_SCHEMA_CATALOG_DRIFT");
     if (originalFunction === undefined) throw new Error("M04_FIXTURE_FUNCTION_MISSING");
     await client.query(originalFunction);
-    await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+    await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     await client.end();
   }, 240_000);
 
@@ -404,7 +443,7 @@ describe("M04 migration runner", () => {
               WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')`,
       );
       expect(defaultPublicGrants.rows).toEqual([]);
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
       for (const [grant, revoke] of [
         [
           "GRANT SELECT ON m04_binding_requests TO ai_ark_m01_m02_login",
@@ -434,7 +473,7 @@ describe("M04 migration runner", () => {
         await owner.query(grant);
         await expect(validate(env), grant).rejects.toThrow("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
         await owner.query(revoke);
-        await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+        await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
       }
       const runtimePool = new Pool({ connectionString: env.AI_ARK_M04_DATABASE_RUNTIME_URL });
       const writerPool = new Pool({ connectionString: env.AI_ARK_M01_M02_DATABASE_WRITER_URL });
@@ -474,7 +513,7 @@ describe("M04 migration runner", () => {
           } finally {
             await owner.query(revoke);
           }
-          await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+          await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
         }
       } finally {
         await runtimePool.end();
@@ -488,7 +527,7 @@ describe("M04 migration runner", () => {
         await owner.query("REVOKE ai_ark_m04_extra_group FROM ai_ark_m04_login");
         await owner.query("DROP ROLE ai_ark_m04_extra_group");
       }
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
       await owner.query("CREATE ROLE ai_ark_m04_transitive_bridge NOLOGIN");
       await owner.query("GRANT ai_ark_m04_transitive_bridge TO ai_ark_m01_m02_writer");
       await owner.query("GRANT ai_ark_m04_runtime TO ai_ark_m04_transitive_bridge");
@@ -499,7 +538,7 @@ describe("M04 migration runner", () => {
         await owner.query("REVOKE ai_ark_m04_transitive_bridge FROM ai_ark_m01_m02_writer");
         await owner.query("DROP ROLE ai_ark_m04_transitive_bridge");
       }
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     } finally {
       await owner.end();
     }
@@ -557,7 +596,7 @@ describe("M04 migration runner", () => {
         } finally {
           await owner.query(restore);
         }
-        await expect(validate(env), restore).resolves.toMatchObject({ migrations: 3 });
+        await expect(validate(env), restore).resolves.toMatchObject({ migrations: 4 });
       }
     } finally {
       await owner.end();
@@ -618,7 +657,7 @@ describe("M04 migration runner", () => {
           await owner.query(`REVOKE ${group} FROM ai_ark_hostile_login`);
           await owner.query(`GRANT ${group} TO ${legitimateLogin} WITH INHERIT TRUE`);
         }
-        await expect(validate(env), group).resolves.toMatchObject({ migrations: 3 });
+        await expect(validate(env), group).resolves.toMatchObject({ migrations: 4 });
       }
     } finally {
       await owner.end();
@@ -668,7 +707,7 @@ describe("M04 migration runner", () => {
         for (const object of transferred.reverse())
           await owner.query(`ALTER ${object} OWNER TO CURRENT_USER`);
       }
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     } finally {
       await owner.end();
     }
@@ -709,7 +748,7 @@ describe("M04 migration runner", () => {
       await expect(
         PostgresEvidencePersistenceAdapterV1.open(runtime, options),
       ).resolves.toBeDefined();
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     } finally {
       await owner.end();
       await runtime.end();
@@ -772,7 +811,7 @@ describe("M04 migration runner", () => {
         } finally {
           await owner.query(revoke);
         }
-        await expect(validate(env), grant).resolves.toMatchObject({ migrations: 3 });
+        await expect(validate(env), grant).resolves.toMatchObject({ migrations: 4 });
       }
       for (const [grant, revoke, role, relation, column, privilege] of [
         [
@@ -846,7 +885,7 @@ describe("M04 migration runner", () => {
         } finally {
           await owner.query(revoke);
         }
-        await expect(validate(env), grant).resolves.toMatchObject({ migrations: 3 });
+        await expect(validate(env), grant).resolves.toMatchObject({ migrations: 4 });
       }
       for (const [grant, revoke] of [
         [
@@ -899,7 +938,7 @@ describe("M04 migration runner", () => {
         } finally {
           await owner.query(revoke);
         }
-        await expect(validate(env), grant).resolves.toMatchObject({ migrations: 3 });
+        await expect(validate(env), grant).resolves.toMatchObject({ migrations: 4 });
       }
       await owner.query("CREATE ROLE ai_ark_acl_bridge NOLOGIN");
       await owner.query(
@@ -942,7 +981,7 @@ describe("M04 migration runner", () => {
         await owner.query("REVOKE ai_ark_m04_runtime FROM ai_ark_acl_bridge");
         await owner.query("DROP ROLE ai_ark_acl_bridge");
       }
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
       const after = await owner.query<{ count: string }>(
         "SELECT count(*) FROM public.m04_binding_requests",
       );
@@ -1331,7 +1370,7 @@ describe("M04 migration runner", () => {
           await runtime.end();
         }
       }
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     } finally {
       await owner.end();
     }
@@ -1376,7 +1415,7 @@ describe("M04 migration runner", () => {
           "GRANT USAGE ON SEQUENCE public.m02_rejected_command_audits_id_seq TO ai_ark_m01_m02_writer",
         );
       }
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
     } finally {
       await writer.end();
       await owner.end();
@@ -1488,7 +1527,7 @@ describe("M04 migration runner", () => {
           "ALTER TABLE public.acquisition_jobs ENABLE TRIGGER m03_m04_fence_acquisition_jobs_stmt",
         );
       }
-      await expect(validate(env)).resolves.toMatchObject({ migrations: 3 });
+      await expect(validate(env)).resolves.toMatchObject({ migrations: 4 });
       runtimePool = runtime();
       writerPool = writer();
       await openRuntime(runtimePool);

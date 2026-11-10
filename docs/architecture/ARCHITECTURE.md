@@ -33,7 +33,9 @@ Infrastructure adapters depend inward and implement ports. Browser UI never impo
 - `@ai-ark/evidence`: the M04 deterministic evidence/Claim projection, completeness, binding service, and inward-owned persistence port.
 - `@ai-ark/job-queue`: also implements the M04 PostgreSQL evidence-persistence port and owns the forward-only migration ledger and validator.
 
-Apps and M05+ feature packages remain deferred to their owning milestones.
+The M05 implementation candidate adds `@ai-ark/draft-generation` for evidence-bound unapproved projections and inward-owned source-read, provider-composition, and draft-persistence ports. Its PostgreSQL adapters remain in `@ai-ark/job-queue`. M05 reads verified historical M04 bindings through the existing trusted evidence infrastructure and stores draft projections in a separately inventoried `ai_ark_m05` namespace; it adds no grants to the M04 namespace. This describes candidate architecture, not a verification verdict; see `docs/milestones/M05_REPORT.md` for the current decision.
+
+Apps and M06+ feature packages remain deferred to their owning milestones.
 
 ## Data and infrastructure direction
 

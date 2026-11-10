@@ -1,0 +1,1 @@
+{"groups":[{"functions":[],"relations":[{"name":"input_chunks","operations":["SELECT","INSERT"]},{"name":"inputs","operations":["SELECT","INSERT"]},{"name":"requests","operations":["SELECT","INSERT"]},{"name":"revisions","operations":["SELECT","INSERT"]}],"role":"M05_WRITER_GROUP","sequences":[]}],"schemaVersion":"M05_RUNTIME_PRIVILEGES_V1"}

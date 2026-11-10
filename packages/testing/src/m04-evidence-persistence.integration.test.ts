@@ -14,6 +14,7 @@ import {
   recomputeM03OutputFingerprint,
   type EvidenceBindingCandidateV1,
 } from "@ai-ark/evidence";
+import { validateAcceptedBindingSnapshotV1 } from "@ai-ark/draft-generation";
 import { PostgresEvidencePersistenceAdapterV1 } from "@ai-ark/job-queue";
 import { Client, Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -426,10 +427,21 @@ describe("M04 durable evidence persistence", { concurrent: false }, () => {
       } finally {
         await client.query("SET session_replication_role=origin");
       }
-      const m04Migration = (await loadMigrations())[2];
+      const migrations = await loadMigrations();
+      const m04Migration = migrations[2];
       if (m04Migration === undefined) throw new Error("M04_MIGRATION_REQUIRED");
       await client.query(
         renderMigrationSql(m04Migration.sql, "m04_persistence", m04Migration.manifest),
+      );
+      const m05Migration = migrations[3];
+      if (m05Migration === undefined) throw new Error("M05_MIGRATION_REQUIRED");
+      await client.query(
+        renderMigrationSql(
+          m05Migration.sql,
+          "m04_persistence",
+          m05Migration.manifest,
+          "ai_ark_m05_login",
+        ),
       );
     } finally {
       client.release();
@@ -2789,5 +2801,47 @@ describe("M04 durable evidence persistence", { concurrent: false }, () => {
     } finally {
       await restoreClient.end();
     }
+  }, 240_000);
+
+  it("exports one verified immutable M05 snapshot through the existing M04 LOGIN", async () => {
+    const accepted = await adapter.persistAccepted(acceptedCandidate);
+    expect(accepted).toMatchObject({ kind: "ACCEPTED" });
+    if (accepted.kind !== "ACCEPTED") throw new Error("M04_READ_BRIDGE_BINDING_REQUIRED");
+    for (let index = 0; index < 8; index += 1)
+      await expect(
+        adapter.persistAccepted(await candidate(`m05-read-alias-${String(index)}`)),
+      ).resolves.toMatchObject({ kind: "ACCEPTED" });
+    const fingerprint = accepted.bindingId.slice(4);
+    const read = await adapter.readAcceptedBinding(
+      accepted.bindingId,
+      accepted.extractionId,
+      fingerprint,
+    );
+    expect(read.kind).toBe("FOUND");
+    if (read.kind !== "FOUND") return;
+    expect(
+      validateAcceptedBindingSnapshotV1(read.snapshot, {
+        bindingId: accepted.bindingId,
+        extractionId: accepted.extractionId,
+        bindingFingerprint: fingerprint,
+      }),
+    ).toEqual(read.snapshot);
+    expect(read.snapshot).toMatchObject({
+      schemaVersion: "M05_ACCEPTED_BINDING_SNAPSHOT_V1",
+      acceptedResultRecord: { bindingId: accepted.bindingId, extractionId: accepted.extractionId },
+      completeness: { id: accepted.completeness.id },
+    });
+    expect(read.snapshot.semanticRequest).not.toHaveProperty("idempotencyKey");
+    expect(read.snapshot.evidenceItems).toEqual(
+      [...read.snapshot.evidenceItems].sort((left, right) =>
+        Buffer.compare(Buffer.from(left.id), Buffer.from(right.id)),
+      ),
+    );
+    await expect(
+      adapter.readAcceptedBinding(accepted.bindingId, accepted.extractionId, "0".repeat(64)),
+    ).resolves.toEqual({ kind: "EXPECTED_BINDING_MISMATCH" });
+    await expect(
+      adapter.readAcceptedBinding(accepted.bindingId, `ext_${"0".repeat(64)}`, fingerprint),
+    ).resolves.toEqual({ kind: "EXPECTED_BINDING_MISMATCH" });
   }, 240_000);
 });

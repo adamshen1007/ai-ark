@@ -8,7 +8,9 @@ M02 is completed, independently accepted, committed, and publicly verified. Its 
 
 M03 Structured Extraction is completed, merged through PR #1, and verified by public CI. The merged PR body records the externally reported independent verdict `GO — M03 COMMIT READY`; the repository does not contain the original reviewer transcript, so this closeout does not present that verdict as independently reproducible from GitHub review metadata. M03 adds deterministic field extraction, attributable source references, provider-neutral bounded AI proposal contracts, explicit conflict/review states, and immutable extraction bundles. It does not publish records, execute acquired source, call a live AI or GitHub provider, or expose a product UI.
 
-M04 Evidence Binding and the approved M03/M04 handoff remain a local, NO-GO candidate under the approved nine-document authority chain. The idempotency-key amendment authorizes reversible lowercase-hex storage with byte-exact `C` collation while retaining the original canonical request bytes. The local, unapplied migration `003` and its 180-cell manifest require complete unchanged-candidate verification and independent R2 review before any readiness claim. No commit, publication, production migration, or M05 work is authorized.
+M04 Evidence Binding and the approved M03/M04 handoff are merged through PR #2 at `e9b62f80f2c5dd2402d145df5e4afda403691f2f`, with successful PR and main CI. The eleven-document authority chain, full local verification, independent review provenance, and the narrowly approved Markdown whitespace exception are recorded in the [M04 governance closeout](docs/milestones/M04_GOVERNANCE_CLOSEOUT.md). Migration `003` has not been applied to production. This is a verified implementation baseline, not a deployed or production-ready product.
+
+M05 implementation is authorized against [M05 specification](docs/milestones/M05_SPEC.md) SHA-256 `dd92ed72cab610298c66918137acd9e959795801bd85b4f1b51bbe630fa72a1d`, approved with separate implementation authorization on 2026-10-27. Its [independent specification review](docs/milestones/M05_SPEC_REVIEW.md) is not implementation acceptance; see [M05 implementation report](docs/milestones/M05_REPORT.md) for the current decision and actual evidence. The frozen specification retains its pre-approval wording. Editorial approval, product-content publication, deployment, release, live-provider use, and M06+ remain out of scope.
 
 ## Runtime
 
@@ -26,7 +28,7 @@ pnpm install --frozen-lockfile
 pnpm verify
 ```
 
-All required root command names exist. Commands for database migrations and alpha validation report their milestone-scoped unavailable state until those capabilities are implemented; they do not fabricate results.
+All required root command names exist. M04 database migration/validation commands are implemented for explicitly authorized disposable local/test targets; they are not production commands. Alpha validation remains milestone-scoped/unavailable and does not fabricate results.
 
 ## Safety invariants
 

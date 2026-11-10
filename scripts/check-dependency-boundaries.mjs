@@ -5,6 +5,7 @@ const allowed = new Map([
   ["@ai-ark/analysis", new Set(["@ai-ark/classification", "@ai-ark/contracts"])],
   ["@ai-ark/contracts", new Set()],
   ["@ai-ark/evidence", new Set(["@ai-ark/contracts"])],
+  ["@ai-ark/draft-generation", new Set(["@ai-ark/contracts", "@ai-ark/evidence"])],
   ["@ai-ark/extraction", new Set(["@ai-ark/contracts"])],
   ["@ai-ark/config", new Set(["@ai-ark/contracts"])],
   [
@@ -13,6 +14,7 @@ const allowed = new Map([
       "@ai-ark/acquisition",
       "@ai-ark/analysis",
       "@ai-ark/contracts",
+      "@ai-ark/draft-generation",
       "@ai-ark/extraction",
       "@ai-ark/evidence",
       "@ai-ark/github-source",
@@ -31,6 +33,7 @@ const allowed = new Map([
     new Set([
       "@ai-ark/classification",
       "@ai-ark/contracts",
+      "@ai-ark/draft-generation",
       "@ai-ark/evidence",
       "@ai-ark/identity",
     ]),
@@ -68,5 +71,5 @@ if (failures.length > 0) {
   console.error(failures.join("\n"));
   process.exitCode = 1;
 } else {
-  console.log(`Dependency boundaries valid for ${allowed.size} M00-M04 packages.`);
+  console.log(`Dependency boundaries valid for ${allowed.size} M00-M05 packages.`);
 }

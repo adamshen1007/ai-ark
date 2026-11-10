@@ -277,7 +277,9 @@ function fieldValue(
   }
 }
 
-export async function createM04CombinedMaximumBundleFixture(): Promise<StructuredExtractionBundleV2> {
+export async function createM04CompleteBundleFixture(
+  sourceReferenceCount = 7,
+): Promise<StructuredExtractionBundleV2> {
   const base = await createGenuineM03BundleFixture(
     0.9,
     "Technical reviewers",
@@ -285,7 +287,13 @@ export async function createM04CombinedMaximumBundleFixture(): Promise<Structure
     false,
     true,
   );
-  const syntheticCount = 4096 - base.sourceReferences.length;
+  if (
+    !Number.isSafeInteger(sourceReferenceCount) ||
+    sourceReferenceCount < 1 ||
+    sourceReferenceCount > 4096
+  )
+    throw new Error("M04_COMPLETE_SOURCE_REFERENCE_COUNT_INVALID");
+  const syntheticCount = Math.max(0, sourceReferenceCount - base.sourceReferences.length);
   const syntheticReferences = Array.from({ length: syntheticCount }, (_, ordinal) => {
     const contentHash = hash({ ordinal, kind: "ABSENCE" });
     const withoutId = {
@@ -304,9 +312,9 @@ export async function createM04CombinedMaximumBundleFixture(): Promise<Structure
     };
     return { ...withoutId, id: `src_${hash(withoutId)}` };
   });
-  const sourceReferences = [...base.sourceReferences, ...syntheticReferences].sort((a, b) =>
-    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-  );
+  const sourceReferences = [...base.sourceReferences, ...syntheticReferences]
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .slice(0, sourceReferenceCount);
   const sourceReferenceIds = sourceReferences.map(({ id }) => id);
   const extractorRefId = base.extractorRefs.find(
     (extractor) => extractor.kind === "DETERMINISTIC_PARSER",
@@ -372,4 +380,8 @@ export async function createM04CombinedMaximumBundleFixture(): Promise<Structure
     outputFingerprint: recomputeM03OutputFingerprint(withoutFingerprint),
   };
   return StructuredExtractionBundleV2Schema.parse(bundle);
+}
+
+export async function createM04CombinedMaximumBundleFixture(): Promise<StructuredExtractionBundleV2> {
+  return createM04CompleteBundleFixture(4096);
 }
