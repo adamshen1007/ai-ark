@@ -5,6 +5,7 @@ import {
   connectDatabase,
   databaseConfiguration,
   expectedSchemaCatalog,
+  expectedM05SchemaCatalog,
   loadMigrations,
   quoteDatabaseIdentifier,
   readSchemaCatalog,
@@ -37,6 +38,7 @@ const immutableTables = [
 
 const GROUP_M04 = "ai_ark_m04_runtime";
 const GROUP_WRITER = "ai_ark_m01_m02_writer";
+const GROUP_M05 = "ai_ark_m05_writer";
 const FENCE_FUNCTIONS = [
   "m03_m04_lock_predecessor_shared()",
   "m03_m04_lock_predecessor_exclusive()",
@@ -539,12 +541,7 @@ export async function validate(env = process.env) {
     }
     await assertM04IdempotencyCollation(client, schema);
     const actualCatalog = await readSchemaCatalog(client, schema);
-    const expectedCatalog = await expectedSchemaCatalog(
-      client,
-      migrations,
-      migrations.length,
-      schema,
-    );
+    const expectedCatalog = await expectedSchemaCatalog(client, migrations.slice(0, 3), 3, schema);
     if (JSON.stringify(actualCatalog) !== JSON.stringify(expectedCatalog)) {
       throw new Error("M04_SCHEMA_CATALOG_DRIFT");
     }
@@ -572,6 +569,127 @@ export async function validate(env = process.env) {
     );
     if (semanticIndex.rowCount !== 1) throw new Error("M04_SCHEMA_INDEX_DRIFT");
     await validateRoleAuthority(client, schema, configuration, migrations[2].manifest, env);
+    const m05ActualCatalog = await readSchemaCatalog(client, "ai_ark_m05");
+    const m05ExpectedCatalog = await expectedM05SchemaCatalog(
+      client,
+      migrations[3],
+      configuration.m05LoginRole,
+    );
+    if (JSON.stringify(m05ActualCatalog) !== JSON.stringify(m05ExpectedCatalog))
+      throw new Error("M04_SCHEMA_CATALOG_DRIFT");
+    const m05Roles = await client.query(
+      `SELECT rolname,rolcanlogin,rolsuper,rolbypassrls,rolcreaterole,rolcreatedb,rolreplication
+         FROM pg_roles WHERE rolname=ANY($1::text[]) ORDER BY rolname`,
+      [[GROUP_M05, configuration.m05LoginRole]],
+    );
+    if (
+      m05Roles.rowCount !== 2 ||
+      m05Roles.rows.some(
+        (role) =>
+          role.rolsuper ||
+          role.rolbypassrls ||
+          role.rolcreaterole ||
+          role.rolcreatedb ||
+          role.rolreplication ||
+          role.rolcanlogin !== (role.rolname === configuration.m05LoginRole),
+      )
+    )
+      throw new Error("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+    const m05Membership = await client.query(
+      `SELECT parent.rolname parent_name,member.rolname member_name,m.inherit_option,m.set_option,m.admin_option
+         FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
+        WHERE parent.rolname=ANY($1::text[]) OR member.rolname=ANY($1::text[])
+        ORDER BY parent.rolname,member.rolname`,
+      [[GROUP_M05, configuration.m05LoginRole]],
+    );
+    if (
+      m05Membership.rowCount !== 1 ||
+      m05Membership.rows[0]?.parent_name !== GROUP_M05 ||
+      m05Membership.rows[0]?.member_name !== configuration.m05LoginRole ||
+      !m05Membership.rows[0]?.inherit_option ||
+      !m05Membership.rows[0]?.set_option ||
+      m05Membership.rows[0]?.admin_option
+    )
+      throw new Error("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+    const m05InboundClosure = await client.query(
+      `WITH RECURSIVE inheritors(oid) AS (
+         SELECT oid FROM pg_roles WHERE rolname=$1
+         UNION SELECT m.member FROM pg_auth_members m JOIN inheritors prior ON prior.oid=m.roleid
+          WHERE m.inherit_option OR m.set_option
+       ) SELECT rolname FROM inheritors JOIN pg_roles USING(oid) ORDER BY rolname`,
+      [GROUP_M05],
+    );
+    if (
+      m05InboundClosure.rows.map(({ rolname }) => rolname).join(",") !==
+      [GROUP_M05, configuration.m05LoginRole].sort().join(",")
+    )
+      throw new Error("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+    const m05OutboundClosure = await client.query(
+      `WITH RECURSIVE reachable(oid) AS (
+         SELECT oid FROM pg_roles WHERE rolname=$1
+         UNION SELECT m.roleid FROM pg_auth_members m JOIN reachable prior ON prior.oid=m.member
+          WHERE m.inherit_option OR m.set_option
+       ) SELECT r.rolname,(r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication) elevated
+           FROM reachable JOIN pg_roles r USING(oid) ORDER BY r.rolname`,
+      [configuration.m05LoginRole],
+    );
+    if (
+      m05OutboundClosure.rows.some(({ elevated }) => elevated) ||
+      m05OutboundClosure.rows.map(({ rolname }) => rolname).join(",") !==
+        [GROUP_M05, configuration.m05LoginRole].sort().join(",")
+    )
+      throw new Error("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+    const m05Acl = await client.query(
+      `SELECT c.relname,
+              has_table_privilege($1,c.oid,'SELECT') can_select,
+              has_table_privilege($1,c.oid,'INSERT') can_insert,
+              has_table_privilege($1,c.oid,'UPDATE') can_update,
+              has_table_privilege($1,c.oid,'DELETE') can_delete,
+              has_table_privilege($1,c.oid,'TRUNCATE') can_truncate,
+              has_table_privilege($1,c.oid,'REFERENCES') can_references,
+              has_table_privilege($1,c.oid,'TRIGGER') can_trigger
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='ai_ark_m05' AND c.relkind='r' ORDER BY c.relname`,
+      [configuration.m05LoginRole],
+    );
+    if (
+      m05Acl.rowCount !== 4 ||
+      m05Acl.rows.some(
+        (row) =>
+          !row.can_select ||
+          !row.can_insert ||
+          row.can_update ||
+          row.can_delete ||
+          row.can_truncate ||
+          row.can_references ||
+          row.can_trigger,
+      )
+    )
+      throw new Error("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+    const m05RuntimeUrl = runtimeConnectionUrl(
+      env,
+      configuration.databaseUrl,
+      configuration.m05LoginRole,
+      "AI_ARK_M05_DATABASE_RUNTIME_URL",
+    );
+    const m05Runtime = new Client({ connectionString: m05RuntimeUrl });
+    try {
+      await m05Runtime.connect();
+      const session = (
+        await m05Runtime.query(
+          "SELECT session_user,current_user,has_schema_privilege(current_user,'ai_ark_m05','USAGE') usage,has_schema_privilege(current_user,'ai_ark_m05','CREATE') create_privilege",
+        )
+      ).rows[0];
+      if (
+        session?.session_user !== configuration.m05LoginRole ||
+        session.current_user !== configuration.m05LoginRole ||
+        !session.usage ||
+        session.create_privilege
+      )
+        throw new Error("M04_DATABASE_ROLE_AUTHORITY_DRIFT");
+    } finally {
+      await m05Runtime.end().catch(() => undefined);
+    }
     return {
       migrations: migrations.length,
       tables: requiredTables.length,

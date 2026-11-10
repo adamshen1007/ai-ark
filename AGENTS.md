@@ -4,12 +4,12 @@
 
 AI ARK is a governed GitHub-to-Skill Technical Alpha that turns a fixed public GitHub revision into structured, evidence-backed, human-reviewable Skill records. Primary alpha users are internal editors/founders and technical reviewers; later validation users and creator participants evaluate approved records and provide evidence.
 
-The validated repository outcome is M03 `GO`: provider-API-only GitHub acquisition produces immutable, policy-versioned snapshots; M02 adds deterministic classification and stable Resource/ResourceVersion identity; and M03 adds deterministic and bounded AI-assisted structured extraction with attributable source references, explicit uncertainty, and immutable extraction bundles. It does not create durable Claims/EvidenceItems, generate drafts, or publish product content.
+The validated repository outcome is M04 `GO`: provider-API-only GitHub acquisition produces immutable, policy-versioned snapshots; M02 adds deterministic classification and stable Resource/ResourceVersion identity; M03 adds deterministic and bounded AI-assisted structured extraction; and M04 durably binds immutable Claims/EvidenceItems to the retained M03/M02 lineage. The repository does not yet generate drafts or publish product content.
 
 - Current phase: GitHub-to-Skill Technical Alpha.
-- Completed and publicly verified implementation baseline: M00, M01, M02, and M03.
+- Completed and publicly verified implementation baseline: M00, M01, M02, M03, and M04. M04 merged through PR #2 at `e9b62f80f2c5dd2402d145df5e4afda403691f2f`; PR CI `40439508880` and main CI `40439719902` passed. See `docs/milestones/M04_GOVERNANCE_CLOSEOUT.md` for exact evidence and limits.
 - M03 authority: approved `docs/milestones/M03_SPEC.md` at SHA-256 `3946c15149d08b15e50697dc83d746979f0b2a8a87abeb5dbb25a78809949f80`, completed implementation, merged PR #1, and successful public CI run `33422220807`. The merged PR body records the externally reported independent verdict `GO — M03 COMMIT READY`; its original reviewer transcript is not repository/GitHub review evidence.
-- Current authorization boundary: M04 implementation against the exact eleven-document M03/M04 authority chain is approved and authorized, including the alternate-unique conflict clarification at SHA-256 `44f6d6a8577ecd95eb8689446bd5e05d75fbdf52341b26d67e8477a409380e87` and closure-reachability clarification at SHA-256 `3a3e694075fb3897ee68821a7254dbb04b457e7506f854b74879f3d35123875b`. The seventh row-lock correction retains five writer `UPDATE` cells for `SELECT ... FOR UPDATE`, and the 180-cell V2 manifest remains frozen. The local, unapplied migration `003` candidate remains NO-GO until its full unchanged-byte gates and independent R2 review close. Commit, push, PR, merge, deployment, release, publication, production migration, and M05+ remain unauthorized.
+- Current authorization boundary: M04 Git publication is complete. Its eleven-document authority chain and 180-cell V2 manifest remain frozen; the seventh row-lock correction retains five writer `UPDATE` cells. The owner approved only the two exact line-3 Markdown hard breaks in the alternate-unique amendments as a raw-whitespace-gate exception. This is not a general waiver. On 2026-10-27 the owner approved `docs/milestones/M05_SPEC.md` at whole-file SHA-256 `dd92ed72cab610298c66918137acd9e959795801bd85b4f1b51bbe630fa72a1d` and separately authorized implementation against those exact bytes. The specification's pre-approval wording remains frozen; this ledger records the subsequent authorization. New commit/push/PR/merge, deployment, release, production migration, product-content publication, live-provider use, and M06+ require separate authorization.
 
 ## 2. Scope and Non-Goals
 
@@ -19,7 +19,7 @@ Preserve the completed M03 immutable-bundle handoff boundary. Never use later wo
 
 ### Do not implement in the active milestone
 
-- M05+ draft generation, editorial review, publication, directory/search, validation harness, or user validation.
+- M06+ editorial review, approval/publication, directory/search, validation harness, or user validation. M05 permits only the exact approved internal draft-generation and durable-projection scope, not UI or free-form factual AI synthesis.
 - Full marketplace, public accounts/profiles/comments/reviews/creator claims, broad ranking, Labs, public API/MCP/Agent catalogue, dynamic workflows, payments, sponsorship, mirroring, or public Mainland deployment.
 - Autonomous installation or execution, automatic verification badges, automatic or public publication, semantic search, graph databases, Redis, Kafka, Elasticsearch, Kubernetes, or a microservice network.
 - Runtime verification of acquired repositories, live-provider-required CI, speculative platform abstractions, empty packages, placeholder production services, unrelated refactors, or production deployment.
@@ -40,6 +40,8 @@ Within that hierarchy, the approved active-milestone spec controls its defined i
 
 Use `README.md` as the repository entry point; `docs/architecture/ARCHITECTURE.md`, `docs/architecture/DEPENDENCY_RULES.md`, `docs/architecture/SECURITY_BOUNDARIES.md`, accepted ADRs, and `docs/governance/` refine the authorities above. Reports record evidence but do not silently expand authorization.
 
+M05 implementation is additionally governed by `docs/milestones/M05_SPEC.md` at the exact approved SHA-256 in Section 1. Preserve its bytes, all eleven predecessor specifications, migrations 001–003, and the 180-cell M04 manifest. Track implementation progress and actual gate evidence in `docs/milestones/M05_REPORT.md`; a specification-review GO is not implementation GO.
+
 Resolve conflicts by preserving security and evidence integrity first, then narrow Technical Alpha scope, canonical contracts, and explicit uncertainty. The prototype never defines system truth. Record every material conflict and resolution.
 
 ## 4. Repository, Stack, and Layout
@@ -48,7 +50,7 @@ Resolve conflicts by preserving security and evidence integrity first, then narr
 - Intended base: `main`; the public `origin` is `https://github.com/adamshen1007/ai-ark.git`, and local `main` tracks `origin/main`.
 - Runtime: Node `22.23.1`, pnpm `11.7.0`, TypeScript `6.0.3`; versions are pinned in `.node-version`, `.nvmrc`, and `package.json`.
 - CI: `.github/workflows/ci.yml` runs frozen installation and `pnpm verify` on pull requests and pushes to `main`.
-- Implemented packages: `contracts`, `config`, `testing`, `acquisition`, `github-source`, `object-storage`, `job-queue`, `observability`, `analysis`, `classification`, `identity`, and `extraction` under `packages/`.
+- Accepted-baseline packages: `contracts`, `config`, `testing`, `acquisition`, `github-source`, `object-storage`, `job-queue`, `observability`, `analysis`, `classification`, `identity`, `extraction`, and `evidence` under `packages/`. The `draft-generation` candidate is governed by approved M05 authority; use `M05_REPORT.md` for its current verification decision rather than inferring acceptance from package presence.
 - Supporting areas: `fixtures/`, `scripts/`, `docs/`, and `specs/`. Do not create the future `apps/` or package layout until its owning milestone needs real behavior.
 - Planned provider-neutral services: GitHub API/content endpoints, PostgreSQL, S3-compatible object storage, an OIDC-compatible identity provider, and an approved AI provider. No production environment or concrete OIDC/AI/storage vendor is selected here.
 
@@ -68,30 +70,36 @@ Resolve conflicts by preserving security and evidence integrity first, then narr
 
 Run from the repository root with the pinned runtime.
 
-| Purpose                | Verified repository command                           | Current semantics                                                         |
-| ---------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------- |
-| Install                | `pnpm install --frozen-lockfile`                      | CI-supported; installation is not authorized by every task                |
-| Format                 | `pnpm format`                                         | Writes files; scope it carefully                                          |
-| Format check           | `pnpm format:check`                                   | Read-only check                                                           |
-| Lint                   | `pnpm lint`                                           | ESLint plus dependency and source-safety checks                           |
-| Boundary scan          | `pnpm lint:boundaries`                                | Fails on unknown/forbidden package edges                                  |
-| Source-safety scan     | `pnpm lint:source-safety`                             | Checks acquired-content runtime paths                                     |
-| Typecheck              | `pnpm typecheck`                                      | Turborepo package typecheck                                               |
-| Full tests             | `pnpm test`                                           | All discovered Vitest tests                                               |
-| Unit                   | `pnpm test:unit`                                      | Positional filters are supported, e.g. `pnpm test:unit -- acquisition`    |
-| Contract               | `pnpm test:contract`                                  | Positional filters are supported                                          |
-| Integration            | `pnpm test:integration`                               | Suites may be milestone-scoped/opt-in                                     |
-| Fixtures               | `pnpm test:fixtures`                                  | Suites may be milestone-scoped                                            |
-| Adversarial            | `pnpm test:adversarial`                               | Suites may be milestone-scoped                                            |
-| E2E                    | `pnpm test:e2e`                                       | No current feature evidence; empty suite is not a pass claim              |
-| Build                  | `pnpm build`                                          | Builds workspace packages                                                 |
-| Required local/CI gate | `pnpm verify`                                         | Lint, format check, typecheck, unit, contract, and build                  |
-| Database               | `pnpm db:migrate`, `pnpm db:validate`                 | Interface exists; owning capability remains milestone-scoped/unavailable  |
-| Validation             | `pnpm validation:technical`, `pnpm validation:report` | Interface exists; measurements/report remain milestone-scoped/unavailable |
+| Purpose                | Verified repository command                           | Current semantics                                                                                                 |
+| ---------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Install                | `pnpm install --frozen-lockfile`                      | CI-supported; installation is not authorized by every task                                                        |
+| Format                 | `pnpm format`                                         | Writes files; scope it carefully                                                                                  |
+| Format check           | `pnpm format:check`                                   | Read-only check                                                                                                   |
+| Lint                   | `pnpm lint`                                           | ESLint plus dependency and source-safety checks                                                                   |
+| Boundary scan          | `pnpm lint:boundaries`                                | Fails on unknown/forbidden package edges                                                                          |
+| Source-safety scan     | `pnpm lint:source-safety`                             | Checks acquired-content runtime paths                                                                             |
+| Typecheck              | `pnpm typecheck`                                      | Turborepo package typecheck                                                                                       |
+| Full tests             | `pnpm test`                                           | All discovered Vitest tests                                                                                       |
+| Unit                   | `pnpm test:unit`                                      | Positional filters are supported, e.g. `pnpm test:unit -- acquisition`                                            |
+| Contract               | `pnpm test:contract`                                  | Positional filters are supported                                                                                  |
+| Integration            | `pnpm test:integration`                               | Suites may be milestone-scoped/opt-in                                                                             |
+| Fixtures               | `pnpm test:fixtures`                                  | Suites may be milestone-scoped                                                                                    |
+| Adversarial            | `pnpm test:adversarial`                               | Suites may be milestone-scoped                                                                                    |
+| E2E                    | `pnpm test:e2e`                                       | No current feature evidence; empty suite is not a pass claim                                                      |
+| Build                  | `pnpm build`                                          | Builds workspace packages                                                                                         |
+| Required local/CI gate | `pnpm verify`                                         | Lint, format check, typecheck, unit, contract, and build                                                          |
+| Database               | `pnpm db:migrate`, `pnpm db:validate`                 | M04 runner/validator implemented for explicitly authorized disposable local/test targets; not production commands |
+| Validation             | `pnpm validation:technical`, `pnpm validation:report` | Interface exists; measurements/report remain milestone-scoped/unavailable                                         |
 
 `pnpm verify` does not replace milestone-required fixture, adversarial, integration, E2E, migration, recovery, accessibility, or smoke checks. Do not use the execution prompt’s illustrative `--filter` syntax with Vitest 4; use the positional forms proven in milestone specs/reports.
 
 For an exact integration file, use `pnpm exec vitest run --config vitest.integration.config.ts <repository-relative-test-file>` and add `-t '<test-name>'` only when intentionally selecting cases. Do not use `pnpm test:integration -- <filter>`: this argument boundary has caused unintended broad integration runs. Check the runner's selected-file output before treating a focused invocation as evidence.
+
+`m04-evidence-persistence.integration.test.ts` has ordered fixture initialization inside its first test. Run the full file for its bridge/regression evidence; selecting the bridge alone skips initialization and is not a valid diagnostic or gate.
+
+Concurrency tests must not infer commit order from invocation order or simultaneous barrier release. When claiming both winner orders, deterministically admit the designated contender at the database lock boundary while preserving both transactions' pre-winner snapshots, and assert the actual winner, retry signal and durable row closure.
+
+Workspace package exports resolve generated `dist` files. Before a targeted test after package-source changes, rebuild the affected package and changed dependencies (or run `pnpm build`) and record that build with the receipt. Typecheck alone does not refresh emitted runtime code, and Vitest transforming a test file does not prove its imported workspace package is current. Final frozen-candidate gates must build first; stale-output results are intermediate evidence, not proof of current source bytes.
 
 ## 7. Acceptance and Verification Gates
 

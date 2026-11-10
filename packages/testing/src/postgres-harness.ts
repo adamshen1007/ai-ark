@@ -45,13 +45,25 @@ export class EphemeralPostgresHarness {
     await this.pool.query(
       "CREATE ROLE ai_ark_hostile_login LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION",
     );
-    for (const role of ["ai_ark_m04_login", "ai_ark_m01_m02_login", "ai_ark_hostile_login"]) {
+    await this.pool.query(
+      "CREATE ROLE ai_ark_m05_writer NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION",
+    );
+    await this.pool.query(
+      "CREATE ROLE ai_ark_m05_login LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION",
+    );
+    for (const role of [
+      "ai_ark_m04_login",
+      "ai_ark_m01_m02_login",
+      "ai_ark_m05_login",
+      "ai_ark_hostile_login",
+    ]) {
       const password = randomBytes(24).toString("hex");
       this.loginPasswords.set(role, password);
       await this.pool.query(`ALTER ROLE ${role} PASSWORD '${password}'`);
     }
     await this.pool.query("GRANT ai_ark_m04_runtime TO ai_ark_m04_login WITH INHERIT TRUE");
     await this.pool.query("GRANT ai_ark_m01_m02_writer TO ai_ark_m01_m02_login WITH INHERIT TRUE");
+    await this.pool.query("GRANT ai_ark_m05_writer TO ai_ark_m05_login WITH INHERIT TRUE");
     return this.pool;
   }
 

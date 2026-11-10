@@ -78,6 +78,18 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/draft-generation:
+    dependencies:
+      '@ai-ark/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@ai-ark/evidence':
+        specifier: workspace:*
+        version: link:../evidence
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+
   packages/evidence:
     dependencies:
       '@ai-ark/contracts':
@@ -131,6 +143,9 @@ importers:
       '@ai-ark/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@ai-ark/draft-generation':
+        specifier: workspace:*
+        version: link:../draft-generation
       '@ai-ark/evidence':
         specifier: workspace:*
         version: link:../evidence
@@ -164,6 +179,9 @@ importers:
       '@ai-ark/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@ai-ark/draft-generation':
+        specifier: workspace:*
+        version: link:../draft-generation
       '@ai-ark/evidence':
         specifier: workspace:*
         version: link:../evidence

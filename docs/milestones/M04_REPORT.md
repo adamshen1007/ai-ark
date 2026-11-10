@@ -1,5 +1,7 @@
 # M04 implementation report — current local candidate
 
+Historical implementation ledger: the 2026-10-27 [governance closeout](M04_GOVERNANCE_CLOSEOUT.md) records the subsequent Git authorization, two-line whitespace exception, merged PR, and public CI. Earlier authorization and NO-GO statements below describe their checkpoint dates; they do not override that closeout. Approved specifications and implementation bytes were preserved during publication.
+
 Updated: 2026-10-26. Decision: **GO — M04 COMMIT READY** for the exact report-excluding 283-file candidate digest `6601951c59011900c894fadeba88b55b0f5f3037194b57b65cb9274c791d7e84`. This is local implementation readiness, not publication approval. Unfiltered integration, full `pnpm test`, source-only frozen-install verification, bounded final hash/diff/secrets checks, and fresh independent R2 closeout passed. The fifth amendment's trusted administrative-DDL exclusion remains a separate approved residual boundary. Commit, push, PR, merge, production migration, deployment, release, publication, and M05+ remain unauthorized. The sections below retain earlier diagnostic history; the final section records the current result.
 
 ## Authority and scope

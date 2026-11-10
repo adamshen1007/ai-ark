@@ -378,6 +378,7 @@ describe("M04 genuine completeness alternate-key reachability", () => {
   let runtimeB: Pool;
   let adapterA: PostgresEvidencePersistenceAdapterV1;
   let adapterB: PostgresEvidencePersistenceAdapterV1;
+  let maximumBindingIdentity: { bindingId: string; extractionId: string } | undefined;
 
   beforeAll(async () => {
     adminA = await harness.start();
@@ -1002,6 +1003,11 @@ describe("M04 genuine completeness alternate-key reachability", () => {
         kind: "ACCEPTED",
         replayed: false,
       });
+      if (accepted.kind !== "ACCEPTED") throw new Error("M04_MAXIMUM_BINDING_NOT_ACCEPTED");
+      maximumBindingIdentity = {
+        bindingId: accepted.bindingId,
+        extractionId: accepted.extractionId,
+      };
       const tracePhase = (phase: string) => {
         if (process.env.AI_ARK_M04_MAX_TRACE === "1")
           process.stderr.write(
@@ -1042,8 +1048,7 @@ describe("M04 genuine completeness alternate-key reachability", () => {
         replayed: true,
       });
       const assertReplayIdentity = (result: typeof replay) => {
-        if (accepted.kind !== "ACCEPTED" || result.kind !== "ACCEPTED")
-          throw new Error("M04_MAXIMUM_REPLAY_NOT_ACCEPTED");
+        if (result.kind !== "ACCEPTED") throw new Error("M04_MAXIMUM_REPLAY_NOT_ACCEPTED");
         expect(result.resultId).toBe(accepted.resultId);
         expect(result.resultFingerprint).toBe(accepted.resultFingerprint);
         expect(result.bindingId).toBe(accepted.bindingId);
@@ -1077,6 +1082,33 @@ describe("M04 genuine completeness alternate-key reachability", () => {
         );
       }
       await closePools();
+    }
+  }, 240_000);
+
+  it("exports the full maximum closure through the actual M04 LOGIN read bridge", async () => {
+    if (maximumBindingIdentity === undefined) throw new Error("M04_MAXIMUM_BINDING_MISSING");
+    const runtime = new Pool({
+      connectionString: harness.connectionUriForRole("ai_ark_m04_login", "ai_ark_m04_maximum"),
+    });
+    try {
+      const reader = await PostgresEvidencePersistenceAdapterV1.open(runtime, {
+        schema,
+        loginRole: "ai_ark_m04_login",
+        peerLoginRole: "ai_ark_m01_m02_login",
+        now: () => new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const result = await reader.readAcceptedBinding(
+        maximumBindingIdentity.bindingId,
+        maximumBindingIdentity.extractionId,
+        maximumBindingIdentity.bindingId.slice(4),
+      );
+      expect(result.kind).toBe("FOUND");
+      if (result.kind !== "FOUND") return;
+      expect(result.snapshot.evidenceItems).toHaveLength(4_096);
+      expect(result.snapshot.claims).toHaveLength(20);
+      expect(result.snapshot.links).toHaveLength(81_920);
+    } finally {
+      await runtime.end();
     }
   }, 240_000);
 

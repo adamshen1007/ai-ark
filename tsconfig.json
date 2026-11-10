@@ -8,6 +8,7 @@
     { "path": "./packages/github-source" },
     { "path": "./packages/object-storage" },
     { "path": "./packages/job-queue" },
-    { "path": "./packages/observability" }
+    { "path": "./packages/observability" },
+    { "path": "./packages/draft-generation" }
   ]
 }

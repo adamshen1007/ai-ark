@@ -12,6 +12,7 @@ import {
 export async function migrate(env = process.env, testFault = {}) {
   const migrations = await loadMigrations();
   const { client, schema } = await connectDatabase(env);
+  const m05LoginRole = env.AI_ARK_M05_DATABASE_LOGIN_ROLE;
   try {
     await client.query("SELECT pg_advisory_lock(hashtextextended('ai-ark:migrations',0))");
     const ledgerExists =
@@ -50,7 +51,9 @@ export async function migrate(env = process.env, testFault = {}) {
       if (!migration) throw new Error("M04_MIGRATION_SEQUENCE_INVALID");
       await client.query("BEGIN");
       try {
-        await client.query(renderMigrationSql(migration.sql, schema, migration.manifest));
+        await client.query(
+          renderMigrationSql(migration.sql, schema, migration.manifest, m05LoginRole),
+        );
         if (testFault.failDuringVersion === migration.version)
           throw new Error("M04_TEST_MIGRATION_INTERRUPTED_DURING");
         if (migration.version === "003") {
@@ -60,7 +63,7 @@ export async function migrate(env = process.env, testFault = {}) {
               "INSERT INTO schema_migrations(version,filename,sha256,applied_at) VALUES ($1,$2,$3,now())",
               [item.version, item.filename, item.sha256],
             );
-        } else if (ledgerExists) {
+        } else if (ledgerExists || migration.version > "003") {
           await client.query(
             "INSERT INTO schema_migrations(version,filename,sha256,applied_at) VALUES ($1,$2,$3,now())",
             [migration.version, migration.filename, migration.sha256],
